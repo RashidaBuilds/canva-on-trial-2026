@@ -8,8 +8,10 @@ export default function JoinScreen({ onJoin, isLateJoin = false }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { initAudio, playJoinConfirmation } = useAudioEngine();
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
     const trimmed = nickname.trim();
     if (!trimmed) {
       setError('Please enter a nickname to proceed.');
@@ -21,9 +23,22 @@ export default function JoinScreen({ onJoin, isLateJoin = false }) {
     }
 
     initAudio();
-    playJoinConfirmation();
     setIsSubmitting(true);
-    onJoin(trimmed);
+    setError('');
+
+    try {
+      const result = await onJoin(trimmed);
+      if (result && !result.success) {
+        setIsSubmitting(false);
+        setError(result.error || 'Registration failed. Please try again.');
+      } else {
+        // Successful registration confirmation
+        playJoinConfirmation();
+      }
+    } catch (err) {
+      setIsSubmitting(false);
+      setError('Network error. Please try again.');
+    }
   };
 
   return (
@@ -88,7 +103,7 @@ export default function JoinScreen({ onJoin, isLateJoin = false }) {
                 marginTop: '4px'
               }}
             >
-              Watch the screen.
+              Watch the main screen.
             </p>
           </div>
         ) : (
@@ -199,6 +214,7 @@ export default function JoinScreen({ onJoin, isLateJoin = false }) {
                     type="text"
                     placeholder="Your nickname"
                     value={nickname}
+                    disabled={isSubmitting}
                     onChange={(e) => {
                       setNickname(e.target.value);
                       if (error) setError('');
@@ -214,11 +230,12 @@ export default function JoinScreen({ onJoin, isLateJoin = false }) {
                       border: error ? '1px solid var(--color-burgundy)' : '1px solid var(--border-parchment-dark)',
                       borderRadius: 'var(--radius-md)',
                       fontSize: '16px',
-                      color: 'var(--color-black)'
+                      color: 'var(--color-black)',
+                      opacity: isSubmitting ? 0.7 : 1
                     }}
                   />
                   {error && (
-                    <span style={{ fontSize: '12px', color: 'var(--color-burgundy)', marginTop: '4px', display: 'block' }}>
+                    <span style={{ fontSize: '12px', color: 'var(--color-burgundy)', marginTop: '6px', display: 'block' }}>
                       {error}
                     </span>
                   )}
@@ -230,7 +247,7 @@ export default function JoinScreen({ onJoin, isLateJoin = false }) {
                   style={{
                     width: '100%',
                     height: '56px',
-                    backgroundColor: 'var(--color-burgundy)',
+                    backgroundColor: isSubmitting ? 'var(--color-burgundy-hover)' : 'var(--color-burgundy)',
                     color: '#FFFFFF',
                     borderRadius: 'var(--radius-md)',
                     fontFamily: 'var(--font-sans)',
@@ -239,14 +256,23 @@ export default function JoinScreen({ onJoin, isLateJoin = false }) {
                     letterSpacing: '0.02em',
                     boxShadow: '0 4px 12px rgba(137, 1, 0, 0.28)',
                     transition: 'background-color var(--transition-fast), transform var(--transition-fast)',
-                    opacity: isSubmitting ? 0.8 : 1
+                    cursor: isSubmitting ? 'not-allowed' : 'pointer',
+                    opacity: isSubmitting ? 0.85 : 1
                   }}
-                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--color-burgundy-hover)')}
-                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'var(--color-burgundy)')}
-                  onMouseDown={(e) => (e.currentTarget.style.transform = 'scale(0.98)')}
-                  onMouseUp={(e) => (e.currentTarget.style.transform = 'scale(1)')}
+                  onMouseEnter={(e) => {
+                    if (!isSubmitting) e.currentTarget.style.backgroundColor = 'var(--color-burgundy-hover)';
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!isSubmitting) e.currentTarget.style.backgroundColor = 'var(--color-burgundy)';
+                  }}
+                  onMouseDown={(e) => {
+                    if (!isSubmitting) e.currentTarget.style.transform = 'scale(0.98)';
+                  }}
+                  onMouseUp={(e) => {
+                    if (!isSubmitting) e.currentTarget.style.transform = 'scale(1)';
+                  }}
                 >
-                  {isSubmitting ? 'Registering...' : 'Join the Investigation'}
+                  {isSubmitting ? 'Joining the investigation...' : 'Join the Investigation'}
                 </button>
               </form>
             </div>

@@ -6,21 +6,32 @@ import LeaderboardScreen from './screens/LeaderboardScreen';
 import MagnifyingLens from './components/MagnifyingLens';
 import { QUESTIONS, TOTAL_ROUNDS } from './data/questions';
 import { useGameClock, LOBBY_DURATION_MS, ANSWER_DURATION_MS } from './hooks/useGameClock';
-import { fetchBackendData, parseLeaderboardRows, registerPlayer, submitFinalScore, INITIAL_INVESTIGATORS } from './services/api';
+import {
+  fetchBackendData,
+  registerPlayer,
+  submitFinalScore,
+  STORAGE_KEYS,
+  INITIAL_INVESTIGATORS
+} from './services/api';
 
-const STORAGE_KEY_START_TIME = 'canva_trial_2026_start_time';
-const STORAGE_KEY_PLAYER_NAME = 'canva_trial_2026_player_name';
-const STORAGE_KEY_PLAYER_SCORE = 'canva_trial_2026_player_score';
-const STORAGE_KEY_ROSTER = 'canva_trial_2026_roster';
-
-// Total active quiz game time: 90s lobby + 11 rounds * 10s = 200s
-const TOTAL_GAME_DURATION_MS = LOBBY_DURATION_MS + TOTAL_ROUNDS * ANSWER_DURATION_MS; // 200,000ms
+// Total active quiz game time: 90s lobby + 11 rounds * 10s = 200s (200,000ms)
+const TOTAL_GAME_DURATION_MS = LOBBY_DURATION_MS + TOTAL_ROUNDS * ANSWER_DURATION_MS;
 const SESSION_EXPIRY_MS = TOTAL_GAME_DURATION_MS + 40000; // 240,000ms (4 minutes)
 
 // Clean path helper for exact pathname matching
 function normalizePath(pathname) {
   const clean = (pathname || '').replace(/\/+$/, '');
   return clean === '' ? '/' : clean;
+}
+
+// Purge all stored session state to prevent stale players (e.g. Sarah) or old timers from leaking
+function clearStoredSession() {
+  localStorage.removeItem(STORAGE_KEYS.PLAYER_NAME);
+  localStorage.removeItem(STORAGE_KEYS.START_TIME);
+  localStorage.removeItem(STORAGE_KEYS.PLAYER_SCORE);
+  localStorage.removeItem(STORAGE_KEYS.ROSTER);
+  localStorage.removeItem(STORAGE_KEYS.ROW_INDEX);
+  localStorage.removeItem(STORAGE_KEYS.TIME_OFFSET);
 }
 
 export default function App() {
@@ -38,28 +49,37 @@ export default function App() {
 
   const isProjectorView = currentPath === '/leaderboard';
 
-  // 2. State initialization with automatic stale session cleanup
+  // 2. Server time offset for clock drift synchronization
+  const [serverTimeOffset, setServerTimeOffset] = useState(() => {
+    const saved = localStorage.getItem(STORAGE_KEYS.TIME_OFFSET);
+    return saved ? parseInt(saved, 10) || 0 : 0;
+  });
+
+  // 3. State initialization with automatic stale session cleanup
   const [playerName, setPlayerName] = useState(() => {
-    const savedStartTime = localStorage.getItem(STORAGE_KEY_START_TIME);
+    const savedStartTime = localStorage.getItem(STORAGE_KEYS.START_TIME);
     if (savedStartTime) {
       const elapsed = Date.now() - parseInt(savedStartTime, 10);
       if (elapsed > SESSION_EXPIRY_MS) {
-        localStorage.removeItem(STORAGE_KEY_PLAYER_NAME);
-        localStorage.removeItem(STORAGE_KEY_START_TIME);
-        localStorage.removeItem(STORAGE_KEY_PLAYER_SCORE);
+        clearStoredSession();
         return '';
       }
     }
-    return localStorage.getItem(STORAGE_KEY_PLAYER_NAME) || '';
+    return localStorage.getItem(STORAGE_KEYS.PLAYER_NAME) || '';
+  });
+
+  const [playerRowIndex, setPlayerRowIndex] = useState(() => {
+    const saved = localStorage.getItem(STORAGE_KEYS.ROW_INDEX);
+    return saved ? parseInt(saved, 10) : null;
   });
 
   const [playerScore, setPlayerScore] = useState(() => {
-    const saved = localStorage.getItem(STORAGE_KEY_PLAYER_SCORE);
+    const saved = localStorage.getItem(STORAGE_KEYS.PLAYER_SCORE);
     return saved ? parseInt(saved, 10) : 0;
   });
 
   const [startTime, setStartTime] = useState(() => {
-    const saved = localStorage.getItem(STORAGE_KEY_START_TIME);
+    const saved = localStorage.getItem(STORAGE_KEYS.START_TIME);
     if (!saved) return null;
     const parsed = parseInt(saved, 10);
     const elapsed = Date.now() - parsed;
@@ -67,20 +87,11 @@ export default function App() {
     return parsed;
   });
 
-  // Dynamic Investigator Roster: populated by actual joins and backend participants
-  const [investigators, setInvestigators] = useState(() => {
-    const saved = localStorage.getItem(STORAGE_KEY_ROSTER);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      } catch (e) {}
-    }
-    return INITIAL_INVESTIGATORS;
-  });
-
+  // Dynamic Investigator Roster: populated ONLY by active backend participants
+  const [investigators, setInvestigators] = useState(() => INITIAL_INVESTIGATORS);
   const [leaderboardRows, setLeaderboardRows] = useState([]);
   const [isLateJoin, setIsLateJoin] = useState(false);
+  const [isFinalising, setIsFinalising] = useState(false);
   const scoreSubmittedRef = useRef(false);
 
   // Hook into shared authoritative timestamp clock
@@ -92,60 +103,104 @@ export default function App() {
     lobbyRemainingMs
   } = useGameClock({
     startTime: startTime,
+    serverTimeOffset: serverTimeOffset,
     onGameComplete: () => {
       if (playerName && !scoreSubmittedRef.current) {
         scoreSubmittedRef.current = true;
-        submitFinalScore(playerName, playerScore);
+        submitFinalScore(playerName, playerScore, playerRowIndex);
       }
     }
   });
 
-  // 3. Modest Lobby Polling with Random Jitter (6–8s offset; suspended during active questions)
+  // 4. Staggered Polling & Authoritative Session Sync
+  // Polling rules:
+  // - Staggered initial delay: 500-1500ms
+  // - Lobby interval: 6-8s with random jitter
+  // - Active questions (phase === 'QUESTION'): PAUSED completely
+  // - Leaderboard: brief rapid refresh (3-4s for first 15s) to finalize scores
   useEffect(() => {
     let isMounted = true;
     let timeoutId = null;
+    let finalisingTimer = null;
+
+    if (phase === 'LEADERBOARD') {
+      setIsFinalising(true);
+      finalisingTimer = setTimeout(() => {
+        if (isMounted) setIsFinalising(false);
+      }, 15000);
+    }
 
     const poll = async () => {
-      // Do not poll during question rounds to prevent network contention on mobile devices
+      // Never poll during active questions to avoid client-side network contention
       if (phase === 'QUESTION') return;
 
       const data = await fetchBackendData();
       if (!isMounted) return;
 
       if (data) {
-        const parsed = parseLeaderboardRows(data);
-        if (parsed.length > 0) {
-          setLeaderboardRows(parsed);
-          const names = parsed.map(p => p.name);
-          setInvestigators(prev => {
-            const merged = Array.from(new Set([...prev, ...names]));
-            localStorage.setItem(STORAGE_KEY_ROSTER, JSON.stringify(merged));
-            return merged;
-          });
+        // Sync clock offset if provided
+        if (typeof data.serverTimeOffset === 'number' && data.serverTimeOffset !== 0) {
+          setServerTimeOffset(data.serverTimeOffset);
+        }
+
+        // Session reset detection:
+        // If the backend has a new session or reset lobbyStartTime, reconcile state
+        if (data.lobbyStartTime) {
+          if (startTime && Math.abs(data.lobbyStartTime - startTime) > 5000) {
+            // Backend session changed (e.g. sheet cleared for fresh game)
+            clearStoredSession();
+            setStartTime(data.lobbyStartTime);
+            setPlayerRowIndex(null);
+            scoreSubmittedRef.current = false;
+          } else if (!startTime) {
+            setStartTime(data.lobbyStartTime);
+            localStorage.setItem(STORAGE_KEYS.START_TIME, String(data.lobbyStartTime));
+          }
+        }
+
+        // Update leaderboard data
+        if (Array.isArray(data.players)) {
+          setLeaderboardRows(data.players);
+
+          // Update active roster directly from backend players (NO stale localStorage name merging!)
+          // Retains duplicate nicknames properly as separate entries!
+          const backendNames = data.players.map((p) => p.name).filter(Boolean);
+          const currentList = playerName && !backendNames.includes(playerName)
+            ? [playerName, ...backendNames]
+            : backendNames;
+
+          setInvestigators(currentList);
         }
       }
 
-      // Schedule next polling request with 6-8s random offset (jitter)
+      // Schedule next polling interval
       if (isMounted && phase !== 'QUESTION') {
-        const jitterMs = 6000 + Math.floor(Math.random() * 2000);
-        timeoutId = setTimeout(poll, jitterMs);
+        const nextDelayMs = phase === 'LEADERBOARD'
+          ? 3000 + Math.floor(Math.random() * 1500) // 3-4.5s rapid refresh on leaderboard
+          : 6000 + Math.floor(Math.random() * 2000); // 6-8s during lobby
+
+        timeoutId = setTimeout(poll, nextDelayMs);
       }
     };
 
-    poll();
+    // Stagger initial request by 400-1200ms
+    const initialDelayMs = 400 + Math.floor(Math.random() * 800);
+    timeoutId = setTimeout(poll, initialDelayMs);
 
     return () => {
       isMounted = false;
       if (timeoutId) clearTimeout(timeoutId);
+      if (finalisingTimer) clearTimeout(finalisingTimer);
     };
-  }, [phase]);
+  }, [phase, startTime, playerName]);
 
-  // 4. Late joiner detection:
+  // 5. Late joiner detection:
   // ONLY true when game is actively in question phase (elapsed >= 90s && elapsed < 200s) AND visitor has not registered
   useEffect(() => {
     if (startTime && !isProjectorView) {
       const checkLate = () => {
-        const elapsed = Date.now() - startTime;
+        const now = Date.now() + serverTimeOffset;
+        const elapsed = now - startTime;
         if (!playerName && elapsed >= LOBBY_DURATION_MS && elapsed < TOTAL_GAME_DURATION_MS) {
           setIsLateJoin(true);
         } else {
@@ -158,37 +213,51 @@ export default function App() {
     } else {
       setIsLateJoin(false);
     }
-  }, [startTime, playerName, isProjectorView]);
+  }, [startTime, playerName, isProjectorView, serverTimeOffset]);
 
   // Handle Player Registration
-  const handleJoin = useCallback((nickname) => {
-    setPlayerName(nickname);
-    localStorage.setItem(STORAGE_KEY_PLAYER_NAME, nickname);
-
-    // Register with backend service
-    registerPlayer(nickname);
-
-    // Add player to investigators roster immediately and persist
-    setInvestigators(prev => {
-      const updated = prev.includes(nickname) ? prev : [nickname, ...prev];
-      localStorage.setItem(STORAGE_KEY_ROSTER, JSON.stringify(updated));
-      return updated;
-    });
-
-    // If game has not started yet or previous game concluded, establish fresh timestamp
-    const now = Date.now();
-    if (!startTime || (now - startTime >= TOTAL_GAME_DURATION_MS)) {
-      setStartTime(now);
-      localStorage.setItem(STORAGE_KEY_START_TIME, String(now));
+  const handleJoin = useCallback(async (nickname) => {
+    // 1. Call backend registration with ~0.5s stagger, client ID & retry safety
+    const res = await registerPlayer(nickname);
+    if (!res.success) {
+      return { success: false, error: res.error };
     }
-  }, [startTime]);
+
+    // 2. Persist player details locally
+    setPlayerName(nickname);
+    localStorage.setItem(STORAGE_KEYS.PLAYER_NAME, nickname);
+
+    if (res.rowIndex) {
+      setPlayerRowIndex(res.rowIndex);
+      localStorage.setItem(STORAGE_KEYS.ROW_INDEX, String(res.rowIndex));
+    }
+
+    // 3. Synchronise authoritative lobby start time
+    if (res.lobbyStartTime) {
+      setStartTime(res.lobbyStartTime);
+      localStorage.setItem(STORAGE_KEYS.START_TIME, String(res.lobbyStartTime));
+    } else if (!startTime) {
+      const now = Date.now() + (res.serverTimeOffset || serverTimeOffset);
+      setStartTime(now);
+      localStorage.setItem(STORAGE_KEYS.START_TIME, String(now));
+    }
+
+    if (res.serverTimeOffset) {
+      setServerTimeOffset(res.serverTimeOffset);
+    }
+
+    // 4. Update investigator roster immediately
+    setInvestigators((prev) => [nickname, ...prev]);
+
+    return { success: true };
+  }, [startTime, serverTimeOffset]);
 
   // Handle Answer Submission during Question rounds
   const handleAnswerSubmit = useCallback(({ pointsEarned }) => {
     if (pointsEarned > 0) {
-      setPlayerScore(prev => {
+      setPlayerScore((prev) => {
         const nextScore = prev + pointsEarned;
-        localStorage.setItem(STORAGE_KEY_PLAYER_SCORE, String(nextScore));
+        localStorage.setItem(STORAGE_KEYS.PLAYER_SCORE, String(nextScore));
         return nextScore;
       });
     }
@@ -203,7 +272,9 @@ export default function App() {
           leaderboardData={leaderboardRows}
           currentPlayerName=""
           currentPlayerScore={0}
+          currentPlayerRowIndex={null}
           isProjectorView={true}
+          isFinalising={isFinalising}
         />
       </>
     );
@@ -264,7 +335,9 @@ export default function App() {
         leaderboardData={leaderboardRows}
         currentPlayerName={playerName}
         currentPlayerScore={playerScore}
+        currentPlayerRowIndex={playerRowIndex}
         isProjectorView={false}
+        isFinalising={isFinalising}
       />
     </>
   );

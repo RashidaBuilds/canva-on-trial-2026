@@ -9,11 +9,12 @@ export const TOTAL_ROUNDS = 11;               // 10 regular + 1 Final Exhibit
 
 /**
  * Authoritative Timestamp-Based Game Clock
- * Based on performance.now() and epoch delta calculations.
- * Ensures zero drift across re-renders and background tabs.
+ * Based on server-synchronized epoch delta calculations.
+ * Ensures zero drift across devices, re-renders, and background tabs.
  */
 export function useGameClock({
   startTime,
+  serverTimeOffset = 0,
   onPhaseChange,
   onQuestionChange,
   onClueTrigger,
@@ -30,17 +31,22 @@ export function useGameClock({
   const clueTriggeredRef = useRef(false);
 
   useEffect(() => {
-    if (!startTime) return;
+    if (!startTime) {
+      setPhase('LOBBY_NORMAL');
+      setLobbyRemainingMs(LOBBY_DURATION_MS);
+      return;
+    }
 
     let animFrameId;
 
     const tick = () => {
-      const now = Date.now();
+      // Synchronise client clock with server
+      const now = Date.now() + (serverTimeOffset || 0);
       const totalElapsed = now - startTime;
 
       if (totalElapsed < NORMAL_LOBBY_DURATION_MS) {
         // Normal Lobby (0s - 80s)
-        const remaining = Math.max(0, LOBBY_DURATION_MS - totalElapsed);
+        const remaining = Math.max(0, LOBBY_DURATION_MS - Math.max(0, totalElapsed));
         setLobbyRemainingMs(remaining);
         if (prevPhaseRef.current !== 'LOBBY_NORMAL') {
           prevPhaseRef.current = 'LOBBY_NORMAL';
@@ -103,7 +109,7 @@ export function useGameClock({
     return () => {
       cancelAnimationFrame(animFrameId);
     };
-  }, [startTime, onPhaseChange, onQuestionChange, onClueTrigger, onRoundTimeout, onGameComplete]);
+  }, [startTime, serverTimeOffset, onPhaseChange, onQuestionChange, onClueTrigger, onRoundTimeout, onGameComplete]);
 
   return {
     phase,

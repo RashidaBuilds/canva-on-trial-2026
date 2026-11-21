@@ -6,7 +6,9 @@ export default function LeaderboardScreen({
   leaderboardData = [],
   currentPlayerName = '',
   currentPlayerScore = 0,
-  isProjectorView = false
+  currentPlayerRowIndex = null,
+  isProjectorView = false,
+  isFinalising = false
 }) {
   const { playWinnerReveal } = useAudioEngine();
   const audioTriggeredRef = useRef(false);
@@ -19,25 +21,57 @@ export default function LeaderboardScreen({
     }
   }, [playWinnerReveal]);
 
-  // Use actual returned leaderboard data. If empty during initial load, cleanly format fallback
+  // Clone returned leaderboard data
   let list = Array.isArray(leaderboardData) && leaderboardData.length > 0 ? [...leaderboardData] : [];
+
+  // Helper: check if a leaderboard entry belongs to the viewing player
+  const isCurrentPlayer = (investigator) => {
+    if (isProjectorView || !currentPlayerName || !investigator) return false;
+    if (currentPlayerRowIndex && investigator.rowIndex) {
+      return investigator.rowIndex === currentPlayerRowIndex;
+    }
+    return String(investigator.name).toLowerCase() === currentPlayerName.toLowerCase();
+  };
 
   // If on player view and current player has a score, ensure current player is present in ranking
   if (!isProjectorView && currentPlayerName) {
-    const existingIdx = list.findIndex(
-      p => p.name.toLowerCase() === currentPlayerName.toLowerCase()
-    );
+    const existingIdx = currentPlayerRowIndex
+      ? list.findIndex((p) => p.rowIndex === currentPlayerRowIndex)
+      : list.findIndex((p) => String(p.name).toLowerCase() === currentPlayerName.toLowerCase());
+
     if (existingIdx !== -1) {
       list[existingIdx].score = Math.max(list[existingIdx].score, currentPlayerScore);
+      if (currentPlayerRowIndex && !list[existingIdx].rowIndex) {
+        list[existingIdx].rowIndex = currentPlayerRowIndex;
+      }
     } else {
-      list.push({ name: currentPlayerName, score: currentPlayerScore });
+      list.push({
+        id: `row-${currentPlayerRowIndex || 'me'}`,
+        rowIndex: currentPlayerRowIndex || null,
+        name: currentPlayerName,
+        score: currentPlayerScore,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
-  // Sort descending by score
-  list.sort((a, b) => b.score - a.score);
+  // Sort descending by score; tiebreaker: earlier registration timestamp wins
+  list.sort((a, b) => {
+    if (b.score !== a.score) {
+      return b.score - a.score;
+    }
+    const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+    const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+    return timeA - timeB;
+  });
 
-  // Fallback visual safety if empty
+  // Calculate current player's overall rank
+  const myRankIndex = currentPlayerName
+    ? list.findIndex((p) => isCurrentPlayer(p))
+    : -1;
+  const myRank = myRankIndex !== -1 ? myRankIndex + 1 : null;
+
+  // Podium positions (1st, 2nd, 3rd)
   const firstPlace = list[0] || { name: '—', score: 0 };
   const secondPlace = list[1] || { name: '—', score: 0 };
   const thirdPlace = list[2] || { name: '—', score: 0 };
@@ -71,7 +105,7 @@ export default function LeaderboardScreen({
           flex: 1
         }}
       >
-        {/* Title strictly matches Figma: No verdict reached label! */}
+        {/* Title strictly matches Figma */}
         <div style={{ textAlign: 'center' }}>
           <h1
             style={{
@@ -91,9 +125,76 @@ export default function LeaderboardScreen({
           >
             Final Results · Top Investigators
           </p>
+          {isFinalising && (
+            <span
+              style={{
+                display: 'inline-block',
+                marginTop: '6px',
+                fontSize: '12px',
+                color: 'var(--color-burgundy)',
+                fontStyle: 'italic'
+              }}
+            >
+              Tallying final evidence across all participants...
+            </span>
+          )}
         </div>
 
-        {/* Top 3 Podium (2nd - 1st - 3rd) */}
+        {/* Player Personal Results Card: displayed on player device */}
+        {!isProjectorView && currentPlayerName && (
+          <div
+            className="paper-card animate-fade-in"
+            style={{
+              width: '100%',
+              padding: 'clamp(16px, 3vw, 24px)',
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              borderLeft: '4px solid var(--color-burgundy)',
+              backgroundColor: '#FFFBF3',
+              gap: '16px',
+              flexWrap: 'wrap',
+              boxShadow: '0 2px 8px rgba(64, 43, 20, 0.08)'
+            }}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <span className="label-uppercase" style={{ color: 'var(--color-burgundy)', fontSize: '11px' }}>
+                YOUR OFFICIAL CASE REPORT
+              </span>
+              <h2 style={{ fontFamily: 'var(--font-serif)', fontSize: 'clamp(20px, 3vw, 28px)', color: 'var(--color-black)', margin: 0 }}>
+                Investigator {currentPlayerName}
+              </h2>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'clamp(16px, 4vw, 32px)' }}>
+              <div style={{ textAlign: 'center' }}>
+                <span style={{ fontSize: '11px', color: 'var(--color-ink-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block' }}>
+                  Final Score
+                </span>
+                <span style={{ fontFamily: 'var(--font-sans)', fontWeight: 700, fontSize: 'clamp(20px, 3vw, 28px)', color: 'var(--color-burgundy)' }}>
+                  {currentPlayerScore.toLocaleString()}
+                </span>
+              </div>
+
+              <div style={{ textAlign: 'center', borderLeft: '1px solid var(--border-parchment-dark)', paddingLeft: 'clamp(16px, 4vw, 32px)' }}>
+                <span style={{ fontSize: '11px', color: 'var(--color-ink-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block' }}>
+                  Overall Standing
+                </span>
+                <span style={{ fontFamily: 'var(--font-sans)', fontWeight: 700, fontSize: 'clamp(20px, 3vw, 28px)', color: 'var(--color-black)' }}>
+                  {myRank ? `Rank #${myRank}` : '—'}
+                  {list.length > 0 && (
+                    <span style={{ fontSize: '14px', fontWeight: 500, color: 'var(--color-ink-muted)', marginLeft: '4px' }}>
+                      of {list.length}
+                    </span>
+                  )}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Top 3 Global Podium (2nd - 1st - 3rd) */}
         <div
           style={{
             width: '100%',
@@ -129,6 +230,9 @@ export default function LeaderboardScreen({
               }}
             >
               {secondPlace.name}
+              {isCurrentPlayer(secondPlace) && (
+                <span style={{ fontSize: '12px', color: 'var(--color-burgundy)', marginLeft: '4px', display: 'block' }}>(You)</span>
+              )}
             </div>
             <div style={{ fontFamily: 'var(--font-sans)', fontWeight: 700, fontSize: '16px', color: 'var(--color-burgundy)', marginTop: '4px' }}>
               {secondPlace.score.toLocaleString()}
@@ -162,6 +266,9 @@ export default function LeaderboardScreen({
               }}
             >
               {firstPlace.name}
+              {isCurrentPlayer(firstPlace) && (
+                <span style={{ fontSize: '13px', color: 'var(--color-burgundy)', marginLeft: '4px', display: 'block' }}>(You)</span>
+              )}
             </div>
             <div
               style={{
@@ -217,6 +324,9 @@ export default function LeaderboardScreen({
               }}
             >
               {thirdPlace.name}
+              {isCurrentPlayer(thirdPlace) && (
+                <span style={{ fontSize: '12px', color: 'var(--color-burgundy)', marginLeft: '4px', display: 'block' }}>(You)</span>
+              )}
             </div>
             <div style={{ fontFamily: 'var(--font-sans)', fontWeight: 700, fontSize: '16px', color: 'var(--color-burgundy)', marginTop: '4px' }}>
               {thirdPlace.score.toLocaleString()}
@@ -224,7 +334,7 @@ export default function LeaderboardScreen({
           </div>
         </div>
 
-        {/* Clean Rankings Table (Ranks 4 through 10) */}
+        {/* Global Rankings Table (Ranks 4 through 10) */}
         <div
           className="paper-card animate-fade-in"
           style={{
@@ -256,11 +366,11 @@ export default function LeaderboardScreen({
           {/* Table Rows */}
           {runnersUp.map((investigator, idx) => {
             const rank = idx + 4;
-            const isMe = !isProjectorView && currentPlayerName && investigator.name.toLowerCase() === currentPlayerName.toLowerCase();
+            const isMe = isCurrentPlayer(investigator);
 
             return (
               <div
-                key={rank}
+                key={investigator.rowIndex ? `row-${investigator.rowIndex}` : investigator.id || rank}
                 style={{
                   display: 'grid',
                   gridTemplateColumns: '48px 1fr 100px',
@@ -289,7 +399,7 @@ export default function LeaderboardScreen({
         </div>
       </main>
 
-      {/* Small Thank-You Footer matching Figma */}
+      {/* Thank-You Footer matching Figma */}
       <footer style={{ width: '100%', textAlign: 'center', paddingTop: '24px' }}>
         <p style={{ fontSize: '13px', color: 'var(--color-ink-muted)' }}>
           Thank you for joining the investigation.
