@@ -6,7 +6,7 @@ export default function JoinScreen({ onJoin, isLateJoin = false }) {
   const [nickname, setNickname] = useState('');
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const { initAudio, playUiClick } = useAudioEngine();
+  const { initAudio, playJoinConfirmation } = useAudioEngine();
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -21,7 +21,7 @@ export default function JoinScreen({ onJoin, isLateJoin = false }) {
     }
 
     initAudio();
-    playUiClick();
+    playJoinConfirmation();
     setIsSubmitting(true);
     onJoin(trimmed);
   };

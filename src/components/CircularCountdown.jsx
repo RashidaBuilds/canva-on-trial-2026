@@ -1,14 +1,16 @@
 import React from 'react';
 
-export default function CircularCountdown({ remainingMs = 10000, totalMs = 10000 }) {
+export default function CircularCountdown({ remainingMs = 10000, totalMs = 10000, size = 164 }) {
   const seconds = Math.max(0, Math.ceil(remainingMs / 1000));
   const progress = Math.max(0, Math.min(1, remainingMs / totalMs));
 
-  const size = 150;
-  const strokeWidth = 8;
+  const strokeWidth = size >= 200 ? 10 : 8;
   const radius = (size - strokeWidth) / 2;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - (progress * circumference);
+
+  const numberFontSize = size >= 200 ? '80px' : '64px';
+  const labelFontSize = size >= 200 ? '12px' : '10px';
 
   return (
     <div
@@ -17,22 +19,21 @@ export default function CircularCountdown({ remainingMs = 10000, totalMs = 10000
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: '12px',
-        margin: '20px 0'
+        margin: '10px 0'
       }}
     >
       <div style={{ position: 'relative', width: size, height: size }}>
         <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
-          {/* Background track circle */}
+          {/* Background track circle matching Figma #DECDB1 / #CFC2A8 */}
           <circle
             cx={size / 2}
             cy={size / 2}
             r={radius}
-            stroke="rgba(107, 88, 68, 0.15)"
+            stroke="#DECDB1"
             strokeWidth={strokeWidth}
             fill="none"
           />
-          {/* Animated active countdown ring */}
+          {/* Active progress ring in #890100 Burgundy */}
           <circle
             cx={size / 2}
             cy={size / 2}
@@ -63,8 +64,8 @@ export default function CircularCountdown({ remainingMs = 10000, totalMs = 10000
           <span
             style={{
               fontFamily: 'var(--font-sans)',
-              fontWeight: 700,
-              fontSize: '54px',
+              fontWeight: 600,
+              fontSize: numberFontSize,
               lineHeight: 1,
               color: 'var(--color-burgundy)'
             }}
@@ -74,11 +75,11 @@ export default function CircularCountdown({ remainingMs = 10000, totalMs = 10000
           <span
             style={{
               fontFamily: 'var(--font-sans)',
-              fontSize: '10px',
+              fontSize: labelFontSize,
               fontWeight: 600,
               letterSpacing: '0.12em',
               textTransform: 'uppercase',
-              color: 'var(--color-ink-muted)',
+              color: 'var(--color-burgundy)',
               marginTop: '4px'
             }}
           >
@@ -86,18 +87,6 @@ export default function CircularCountdown({ remainingMs = 10000, totalMs = 10000
           </span>
         </div>
       </div>
-
-      <p
-        style={{
-          fontFamily: 'var(--font-serif)',
-          fontSize: '18px',
-          fontWeight: 600,
-          color: 'var(--color-burgundy)',
-          textAlign: 'center'
-        }}
-      >
-        Prepare your case. Question 1 begins shortly.
-      </p>
     </div>
   );
 }

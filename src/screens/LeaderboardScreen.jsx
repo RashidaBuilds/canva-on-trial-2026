@@ -6,8 +6,7 @@ export default function LeaderboardScreen({
   leaderboardData = [],
   currentPlayerName = '',
   currentPlayerScore = 0,
-  isProjectorView = false,
-  onReset
+  isProjectorView = false
 }) {
   const { playWinnerReveal } = useAudioEngine();
   const audioTriggeredRef = useRef(false);
@@ -288,35 +287,6 @@ export default function LeaderboardScreen({
             );
           })}
         </div>
-
-        {/* Start New Investigation Button for Player View */}
-        {!isProjectorView && onReset && (
-          <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'center' }}>
-            <button
-              type="button"
-              onClick={onReset}
-              style={{
-                padding: '14px 32px',
-                backgroundColor: 'var(--color-burgundy)',
-                color: '#FFFFFF',
-                borderRadius: 'var(--radius-md)',
-                fontFamily: 'var(--font-sans)',
-                fontSize: '15px',
-                fontWeight: 600,
-                letterSpacing: '0.02em',
-                boxShadow: '0 4px 14px rgba(137, 1, 0, 0.28)',
-                cursor: 'pointer',
-                transition: 'background-color var(--transition-fast), transform var(--transition-fast)'
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--color-burgundy-hover)')}
-              onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'var(--color-burgundy)')}
-              onMouseDown={(e) => (e.currentTarget.style.transform = 'scale(0.98)')}
-              onMouseUp={(e) => (e.currentTarget.style.transform = 'scale(1)')}
-            >
-              Start New Investigation
-            </button>
-          </div>
-        )}
       </main>
 
       {/* Small Thank-You Footer matching Figma */}

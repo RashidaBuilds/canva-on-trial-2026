@@ -2,13 +2,17 @@ import { useRef, useCallback } from 'react';
 
 /**
  * Native Web Audio API & HTML5 Audio Engine
- * Provides melodic mystery lobby ambience, question ticking, winner reveal, and tactile UI feedback.
+ * Lightweight, zero-dependency audio engine:
+ * 1. One subtle confirmation chime upon successful player join.
+ * 2. Silent normal lobby waiting (no looping music, no drone).
+ * 3. question-tick.mp3 played once during final 10s Get Ready.
+ * 4. question-tick.mp3 played once at start of every 10s question.
+ * 5. winner-reveal.mp3 played once when final leaderboard appears.
+ * 6. Native audio autoplay unlocked via initial Join button click.
  */
 class SoundEngine {
   constructor() {
     this.ctx = null;
-    this.ambientNodes = null;
-    this.ambientInterval = null;
     this.questionTickAudio = null;
     this.winnerRevealAudio = null;
     this.isInitialized = false;
@@ -21,7 +25,7 @@ class SoundEngine {
       if (AudioContext) {
         this.ctx = new AudioContext();
         if (this.ctx.state === 'suspended') {
-          this.ctx.resume();
+          this.ctx.resume().catch(() => {});
         }
       }
 
@@ -33,7 +37,7 @@ class SoundEngine {
 
       this.isInitialized = true;
     } catch (e) {
-      console.warn('AudioEngine init error (silent):', e);
+      console.warn('AudioEngine init error (silent fallback):', e);
     }
   }
 
@@ -44,97 +48,29 @@ class SoundEngine {
   }
 
   /**
-   * Melodic, quiet detective mystery lobby background music
-   * Arpeggiates gentle muted tones in A Minor with subtle warmth and anticipation.
+   * One-time subtle, pleasant confirmation chime upon successful join
    */
-  startLobbyAmbience() {
+  playJoinConfirmation() {
     this.resume();
-    if (!this.ctx || this.ambientInterval) return;
-
+    if (!this.ctx) return;
     try {
-      // Warm pad master gain
-      const masterGain = this.ctx.createGain();
-      masterGain.gain.setValueAtTime(0.001, this.ctx.currentTime);
-      masterGain.gain.exponentialRampToValueAtTime(0.04, this.ctx.currentTime + 2);
-      masterGain.connect(this.ctx.destination);
+      const now = this.ctx.currentTime;
+      const master = this.ctx.createGain();
+      master.gain.setValueAtTime(0.001, now);
+      master.gain.linearRampToValueAtTime(0.06, now + 0.02);
+      master.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+      master.connect(this.ctx.destination);
 
-      // Low foundation drone
-      const droneOsc = this.ctx.createOscillator();
-      const droneFilter = this.ctx.createBiquadFilter();
-      droneOsc.type = 'sine';
-      droneOsc.frequency.setValueAtTime(110, this.ctx.currentTime); // A2 note
-      droneFilter.type = 'lowpass';
-      droneFilter.frequency.setValueAtTime(260, this.ctx.currentTime);
-
-      droneOsc.connect(droneFilter);
-      droneFilter.connect(masterGain);
-      droneOsc.start();
-
-      // Melodic notes sequence in A Minor (frequencies in Hz: A3, C4, E4, B3, G3, A3, F3, E3)
-      const notes = [220.00, 261.63, 329.63, 246.94, 196.00, 220.00, 174.61, 164.81];
-      let noteIndex = 0;
-
-      const playNextArpNote = () => {
-        if (!this.ctx || !this.ambientNodes) return;
-        try {
-          const now = this.ctx.currentTime;
-          const osc = this.ctx.createOscillator();
-          const noteGain = this.ctx.createGain();
-          const filter = this.ctx.createBiquadFilter();
-
-          osc.type = 'triangle';
-          osc.frequency.setValueAtTime(notes[noteIndex % notes.length], now);
-          noteIndex++;
-
-          filter.type = 'lowpass';
-          filter.frequency.setValueAtTime(450, now);
-
-          // Gentle plucked envelope
-          noteGain.gain.setValueAtTime(0.001, now);
-          noteGain.gain.exponentialRampToValueAtTime(0.035, now + 0.05);
-          noteGain.gain.exponentialRampToValueAtTime(0.0001, now + 1.2);
-
-          osc.connect(filter);
-          filter.connect(noteGain);
-          noteGain.connect(masterGain);
-
-          osc.start(now);
-          osc.stop(now + 1.3);
-        } catch (_) {}
-      };
-
-      this.ambientInterval = setInterval(playNextArpNote, 650); // Muted pulse every 650ms
-      this.ambientNodes = { masterGain, droneOsc };
-    } catch (e) {
-      console.warn('Lobby music error:', e);
-    }
-  }
-
-  /**
-   * Stop or fade out lobby music when entering Get Ready state
-   */
-  stopLobbyAmbience() {
-    if (this.ambientInterval) {
-      clearInterval(this.ambientInterval);
-      this.ambientInterval = null;
-    }
-
-    if (this.ambientNodes && this.ctx) {
-      try {
-        const { masterGain, droneOsc } = this.ambientNodes;
-        const now = this.ctx.currentTime;
-        masterGain.gain.setValueAtTime(masterGain.gain.value, now);
-        masterGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.8);
-        setTimeout(() => {
-          try {
-            droneOsc.stop();
-            droneOsc.disconnect();
-            masterGain.disconnect();
-          } catch (_) {}
-        }, 900);
-      } catch (_) {}
-      this.ambientNodes = null;
-    }
+      // Two warm harmonious tones (F#5: 739.99Hz, C#6: 1108.73Hz) for subtle editorial polish
+      [739.99, 1108.73].forEach((freq, idx) => {
+        const osc = this.ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now + idx * 0.05);
+        osc.connect(master);
+        osc.start(now + idx * 0.05);
+        osc.stop(now + 0.45);
+      });
+    } catch (_) {}
   }
 
   /**
@@ -170,7 +106,7 @@ class SoundEngine {
   }
 
   /**
-   * Subtle typewriter / tactile click on interactive choice
+   * Subtle tactile feedback on option choice
    */
   playUiClick() {
     this.resume();
@@ -184,7 +120,7 @@ class SoundEngine {
       osc.frequency.setValueAtTime(750, now);
       osc.frequency.exponentialRampToValueAtTime(140, now + 0.035);
 
-      gain.gain.setValueAtTime(0.05, now);
+      gain.gain.setValueAtTime(0.04, now);
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.035);
 
       osc.connect(gain);
@@ -192,41 +128,6 @@ class SoundEngine {
 
       osc.start(now);
       osc.stop(now + 0.04);
-    } catch (_) {}
-  }
-
-  /**
-   * Subtle transition paper sweep
-   */
-  playTransition() {
-    this.resume();
-    if (!this.ctx) return;
-    try {
-      const now = this.ctx.currentTime;
-      const bufferSize = this.ctx.sampleRate * 0.05;
-      const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-      const data = buffer.getChannelData(0);
-      for (let i = 0; i < bufferSize; i++) {
-        data[i] = Math.random() * 2 - 1;
-      }
-
-      const noise = this.ctx.createBufferSource();
-      noise.buffer = buffer;
-
-      const filter = this.ctx.createBiquadFilter();
-      filter.type = 'bandpass';
-      filter.frequency.setValueAtTime(500, now);
-      filter.Q.setValueAtTime(1.2, now);
-
-      const gain = this.ctx.createGain();
-      gain.gain.setValueAtTime(0.02, now);
-      gain.gain.exponentialRampToValueAtTime(0.0005, now + 0.05);
-
-      noise.connect(filter);
-      filter.connect(gain);
-      gain.connect(this.ctx.destination);
-
-      noise.start(now);
     } catch (_) {}
   }
 }
@@ -241,12 +142,8 @@ export function useAudioEngine() {
     soundEngine.resume();
   }, []);
 
-  const startLobbyAmbience = useCallback(() => {
-    soundEngine.startLobbyAmbience();
-  }, []);
-
-  const stopLobbyAmbience = useCallback(() => {
-    soundEngine.stopLobbyAmbience();
+  const playJoinConfirmation = useCallback(() => {
+    soundEngine.playJoinConfirmation();
   }, []);
 
   const playQuestionTick = useCallback(() => {
@@ -268,18 +165,12 @@ export function useAudioEngine() {
     soundEngine.playUiClick();
   }, []);
 
-  const playTransition = useCallback(() => {
-    soundEngine.playTransition();
-  }, []);
-
   return {
     initAudio,
-    startLobbyAmbience,
-    stopLobbyAmbience,
+    playJoinConfirmation,
     playQuestionTick,
     stopQuestionTick,
     playWinnerReveal,
-    playUiClick,
-    playTransition
+    playUiClick
   };
 }

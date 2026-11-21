@@ -11,6 +11,7 @@ import { fetchBackendData, parseLeaderboardRows, registerPlayer, submitFinalScor
 const STORAGE_KEY_START_TIME = 'canva_trial_2026_start_time';
 const STORAGE_KEY_PLAYER_NAME = 'canva_trial_2026_player_name';
 const STORAGE_KEY_PLAYER_SCORE = 'canva_trial_2026_player_score';
+const STORAGE_KEY_ROSTER = 'canva_trial_2026_roster';
 
 // Total active quiz game time: 90s lobby + 11 rounds * 10s = 200s
 const TOTAL_GAME_DURATION_MS = LOBBY_DURATION_MS + TOTAL_ROUNDS * ANSWER_DURATION_MS; // 200,000ms
@@ -39,18 +40,9 @@ export default function App() {
 
   // 2. State initialization with automatic stale session cleanup
   const [playerName, setPlayerName] = useState(() => {
-    // If testing reset param is present, wipe storage immediately
-    if (window.location.search.includes('reset=true')) {
-      localStorage.removeItem(STORAGE_KEY_PLAYER_NAME);
-      localStorage.removeItem(STORAGE_KEY_START_TIME);
-      localStorage.removeItem(STORAGE_KEY_PLAYER_SCORE);
-      return '';
-    }
-
     const savedStartTime = localStorage.getItem(STORAGE_KEY_START_TIME);
     if (savedStartTime) {
       const elapsed = Date.now() - parseInt(savedStartTime, 10);
-      // If previous session is older than session expiry threshold, clear stale session
       if (elapsed > SESSION_EXPIRY_MS) {
         localStorage.removeItem(STORAGE_KEY_PLAYER_NAME);
         localStorage.removeItem(STORAGE_KEY_START_TIME);
@@ -62,13 +54,11 @@ export default function App() {
   });
 
   const [playerScore, setPlayerScore] = useState(() => {
-    if (window.location.search.includes('reset=true')) return 0;
     const saved = localStorage.getItem(STORAGE_KEY_PLAYER_SCORE);
     return saved ? parseInt(saved, 10) : 0;
   });
 
   const [startTime, setStartTime] = useState(() => {
-    if (window.location.search.includes('reset=true')) return null;
     const saved = localStorage.getItem(STORAGE_KEY_START_TIME);
     if (!saved) return null;
     const parsed = parseInt(saved, 10);
@@ -77,60 +67,78 @@ export default function App() {
     return parsed;
   });
 
-  const [investigators, setInvestigators] = useState(INITIAL_INVESTIGATORS);
+  // Dynamic Investigator Roster: populated by actual joins and backend participants
+  const [investigators, setInvestigators] = useState(() => {
+    const saved = localStorage.getItem(STORAGE_KEY_ROSTER);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) {}
+    }
+    return INITIAL_INVESTIGATORS;
+  });
+
   const [leaderboardRows, setLeaderboardRows] = useState([]);
   const [isLateJoin, setIsLateJoin] = useState(false);
   const scoreSubmittedRef = useRef(false);
 
-  // Clean URL query string if ?reset=true was passed
-  useEffect(() => {
-    if (window.location.search.includes('reset=true')) {
-      const cleanUrl = window.location.pathname;
-      window.history.replaceState({}, document.title, cleanUrl);
+  // Hook into shared authoritative timestamp clock
+  const {
+    phase,
+    currentRound,
+    roundElapsedMs,
+    roundRemainingMs,
+    lobbyRemainingMs
+  } = useGameClock({
+    startTime: startTime,
+    onGameComplete: () => {
+      if (playerName && !scoreSubmittedRef.current) {
+        scoreSubmittedRef.current = true;
+        submitFinalScore(playerName, playerScore);
+      }
     }
-  }, []);
+  });
 
-  // 3. Central Reset Handler
-  const handleReset = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEY_START_TIME);
-    localStorage.removeItem(STORAGE_KEY_PLAYER_NAME);
-    localStorage.removeItem(STORAGE_KEY_PLAYER_SCORE);
-    setPlayerName('');
-    setPlayerScore(0);
-    setStartTime(null);
-    setIsLateJoin(false);
-    scoreSubmittedRef.current = false;
-
-    // If on projector route and resetting to player, navigate to root
-    if (normalizePath(window.location.pathname) !== '/') {
-      window.history.pushState({}, '', '/');
-      setCurrentPath('/');
-    }
-  }, []);
-
-  // Poll backend for real-time participants and scores
+  // 3. Modest Lobby Polling with Random Jitter (6–8s offset; suspended during active questions)
   useEffect(() => {
     let isMounted = true;
-    const loadBackendData = async () => {
-      const data = await fetchBackendData();
-      if (!isMounted || !data) return;
+    let timeoutId = null;
 
-      const parsed = parseLeaderboardRows(data);
-      if (parsed.length > 0) {
-        setLeaderboardRows(parsed);
-        const names = parsed.map(p => p.name);
-        setInvestigators(prev => Array.from(new Set([...prev, ...names])));
+    const poll = async () => {
+      // Do not poll during question rounds to prevent network contention on mobile devices
+      if (phase === 'QUESTION') return;
+
+      const data = await fetchBackendData();
+      if (!isMounted) return;
+
+      if (data) {
+        const parsed = parseLeaderboardRows(data);
+        if (parsed.length > 0) {
+          setLeaderboardRows(parsed);
+          const names = parsed.map(p => p.name);
+          setInvestigators(prev => {
+            const merged = Array.from(new Set([...prev, ...names]));
+            localStorage.setItem(STORAGE_KEY_ROSTER, JSON.stringify(merged));
+            return merged;
+          });
+        }
+      }
+
+      // Schedule next polling request with 6-8s random offset (jitter)
+      if (isMounted && phase !== 'QUESTION') {
+        const jitterMs = 6000 + Math.floor(Math.random() * 2000);
+        timeoutId = setTimeout(poll, jitterMs);
       }
     };
 
-    loadBackendData();
-    const interval = setInterval(loadBackendData, 10000); // 10s poll
+    poll();
 
     return () => {
       isMounted = false;
-      clearInterval(interval);
+      if (timeoutId) clearTimeout(timeoutId);
     };
-  }, []);
+  }, [phase]);
 
   // 4. Late joiner detection:
   // ONLY true when game is actively in question phase (elapsed >= 90s && elapsed < 200s) AND visitor has not registered
@@ -152,24 +160,6 @@ export default function App() {
     }
   }, [startTime, playerName, isProjectorView]);
 
-  // Hook into shared authoritative timestamp clock
-  const {
-    phase,
-    currentRound,
-    roundElapsedMs,
-    roundRemainingMs,
-    lobbyRemainingMs
-  } = useGameClock({
-    startTime: startTime,
-    onGameComplete: () => {
-      // Submit score automatically when all 11 rounds conclude
-      if (playerName && !scoreSubmittedRef.current) {
-        scoreSubmittedRef.current = true;
-        submitFinalScore(playerName, playerScore);
-      }
-    }
-  });
-
   // Handle Player Registration
   const handleJoin = useCallback((nickname) => {
     setPlayerName(nickname);
@@ -178,12 +168,11 @@ export default function App() {
     // Register with backend service
     registerPlayer(nickname);
 
-    // Add to local investigators roster
+    // Add player to investigators roster immediately and persist
     setInvestigators(prev => {
-      if (!prev.includes(nickname)) {
-        return [nickname, ...prev];
-      }
-      return prev;
+      const updated = prev.includes(nickname) ? prev : [nickname, ...prev];
+      localStorage.setItem(STORAGE_KEY_ROSTER, JSON.stringify(updated));
+      return updated;
     });
 
     // If game has not started yet or previous game concluded, establish fresh timestamp
@@ -205,39 +194,7 @@ export default function App() {
     }
   }, []);
 
-  // Helper reset button element for local testing convenience
-  const renderResetButton = () => (
-    <button
-      type="button"
-      onClick={handleReset}
-      title="Reset game state & return to Join screen (?reset=true)"
-      style={{
-        position: 'fixed',
-        bottom: '12px',
-        right: '12px',
-        padding: '6px 12px',
-        backgroundColor: 'rgba(255, 251, 243, 0.92)',
-        border: '1px solid var(--border-parchment-dark)',
-        borderRadius: 'var(--radius-sm)',
-        fontFamily: 'var(--font-sans)',
-        fontSize: '11px',
-        fontWeight: 600,
-        color: 'var(--color-ink-muted)',
-        cursor: 'pointer',
-        zIndex: 9999,
-        boxShadow: '0 2px 6px rgba(0, 0, 0, 0.1)',
-        backdropFilter: 'blur(4px)',
-        transition: 'opacity var(--transition-fast)'
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--color-burgundy)')}
-      onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--color-ink-muted)')}
-    >
-      ↻ Reset Game
-    </button>
-  );
-
   // ROUTE 1: Public Projector View (/leaderboard)
-  // Strictly independent from player view. Always renders leaderboard without requiring join.
   if (isProjectorView) {
     return (
       <>
@@ -247,9 +204,7 @@ export default function App() {
           currentPlayerName=""
           currentPlayerScore={0}
           isProjectorView={true}
-          onReset={handleReset}
         />
-        {renderResetButton()}
       </>
     );
   }
@@ -262,7 +217,6 @@ export default function App() {
       <>
         <MagnifyingLens />
         <JoinScreen onJoin={handleJoin} isLateJoin={isLateJoin} />
-        {renderResetButton()}
       </>
     );
   }
@@ -278,7 +232,6 @@ export default function App() {
           investigators={investigators}
           nickname={playerName}
         />
-        {renderResetButton()}
       </>
     );
   }
@@ -299,7 +252,6 @@ export default function App() {
           roundElapsedMs={roundElapsedMs}
           onAnswerSubmit={handleAnswerSubmit}
         />
-        {renderResetButton()}
       </>
     );
   }
@@ -313,9 +265,7 @@ export default function App() {
         currentPlayerName={playerName}
         currentPlayerScore={playerScore}
         isProjectorView={false}
-        onReset={handleReset}
       />
-      {renderResetButton()}
     </>
   );
 }

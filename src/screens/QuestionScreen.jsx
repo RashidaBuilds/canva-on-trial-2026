@@ -19,18 +19,22 @@ export default function QuestionScreen({
   const [pointsAwarded, setPointsAwarded] = useState(0);
 
   const { playQuestionTick, playUiClick } = useAudioEngine();
+  const lastPlayedQuestionRef = useRef(null);
 
-  // Reset state on new question and trigger the ~9-second ticking audio
+  // Play question-tick.mp3 exactly once per question round; reset state
   useEffect(() => {
     setSelectedOptionIndex(null);
     setIsAnswerSubmitted(false);
     setFeedbackStatus(null);
     setPointsAwarded(0);
 
-    playQuestionTick();
+    if (lastPlayedQuestionRef.current !== question.id) {
+      lastPlayedQuestionRef.current = question.id;
+      playQuestionTick();
+    }
   }, [question.id, playQuestionTick]);
 
-  // Step 1: Option Selection (Only highlights; does NOT reveal feedback or lock)
+  // Step 1: Option Selection (Only highlights; does NOT reveal correctness or lock)
   const handleSelectOption = (index) => {
     if (isAnswerSubmitted || roundRemainingMs <= 0) return;
     playUiClick();
@@ -59,7 +63,7 @@ export default function QuestionScreen({
       setFeedbackStatus('incorrect');
     }
 
-    // Step 3: Inform parent to update running score immediately, but stay on screen for the rest of 10s
+    // Step 3: Inform parent to update running score immediately, but hold question on screen for full 10s
     onAnswerSubmit({
       questionId: question.id,
       selectedOptionIndex,
@@ -97,13 +101,13 @@ export default function QuestionScreen({
         display: 'flex',
         flexDirection: 'column',
         justifyContent: 'space-between',
-        padding: 'clamp(16px, 3.5vw, 40px) clamp(16px, 5vw, 80px)'
+        padding: 'clamp(20px, 4vw, 48px) clamp(16px, 6vw, 80px)'
       }}
     >
-      {/* Top Header with live player score */}
+      {/* 1. Header with live player score */}
       <Header mode="quiz" score={score} />
 
-      {/* Progress Track and Countdown */}
+      {/* 2. Single Question Progress Track & Countdown */}
       <ProgressTrack
         currentRound={question.roundNumber}
         totalRounds={totalRounds}
@@ -111,7 +115,7 @@ export default function QuestionScreen({
         isFinalExhibit={question.isFinalExhibit}
       />
 
-      {/* Main Investigation Split Layout */}
+      {/* 3. Main Question Layout (Side-by-side on Desktop, Stacked on Mobile) */}
       <main
         style={{
           width: '100%',
@@ -124,7 +128,7 @@ export default function QuestionScreen({
           flex: 1
         }}
       >
-        {/* Left Column: Evidence Question Paper */}
+        {/* Left Column: Single Question Paper */}
         <div
           className="paper-card animate-fade-in"
           style={{
@@ -134,24 +138,16 @@ export default function QuestionScreen({
             gap: '16px'
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          {/* One Evidence Label */}
+          <div style={{ display: 'flex', alignItems: 'center' }}>
             <EvidenceLabel text={question.evidenceLabel} color="dark" />
-            <span
-              style={{
-                fontFamily: 'var(--font-sans)',
-                fontSize: '11px',
-                fontWeight: 600,
-                color: 'var(--color-pink)',
-                letterSpacing: '0.1em'
-              }}
-            >
-              CATEGORY {question.category}
-            </span>
           </div>
 
-          {/* Heading strictly in #890100 */}
+          {/* One Question Prompt strictly in #890100 Lora */}
           <h2
             style={{
+              fontFamily: 'var(--font-serif)',
+              fontWeight: 600,
               fontSize: 'clamp(24px, 3.5vw, 36px)',
               lineHeight: 1.25,
               color: 'var(--color-burgundy)'
@@ -160,11 +156,7 @@ export default function QuestionScreen({
             {question.prompt}
           </h2>
 
-          <p style={{ fontSize: '14px', color: 'var(--color-black)' }}>
-            Choose one answer to build your case.
-          </p>
-
-          {/* Clue Banner (Revealed at 5s only if player has not yet submitted an answer) */}
+          {/* One Clue Area (Revealed at 5s only if player has not yet submitted) */}
           {isClueVisible && (
             <div
               className="animate-fade-in"
@@ -206,7 +198,7 @@ export default function QuestionScreen({
           )}
         </div>
 
-        {/* Right Column: 4 Answer Options + Submit Section */}
+        {/* Right Column: Answer Choices matching Figma Component 13:152 */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <div
             style={{
@@ -217,39 +209,40 @@ export default function QuestionScreen({
               marginBottom: '4px'
             }}
           >
-            <span className="label-uppercase">
-              {isAnswerSubmitted ? 'EVIDENCE RECORD LOCKED' : 'CHOOSE ONE ANSWER'}
+            <span
+              style={{
+                fontFamily: 'var(--font-sans)',
+                fontSize: '14px',
+                fontWeight: 500,
+                color: 'var(--color-black)'
+              }}
+            >
+              Choose one answer
             </span>
             <span style={{ fontSize: '12px', color: 'var(--color-ink-muted)' }}>
-              {isAnswerSubmitted ? 'Awaiting next exhibit' : `${letterMarkers.length} choices available`}
+              {isAnswerSubmitted ? 'Record locked' : '4 choices available'}
             </span>
           </div>
 
-          {/* Answer Option Buttons */}
+          {/* Four Answer Option Cards matching Figma 13:152 */}
           {question.options.map((optionText, idx) => {
             const letter = letterMarkers[idx];
             const isSelected = selectedOptionIndex === idx;
 
-            // Highlight styling rules
-            let borderColor = 'var(--border-parchment)';
-            let bgColor = 'var(--bg-parchment-card)';
+            let cardClass = 'answer-option-card';
             let statusBadge = null;
 
             if (isSelected) {
               if (isAnswerSubmitted) {
                 if (feedbackStatus === 'correct') {
-                  borderColor = 'var(--color-correct-border)';
-                  bgColor = 'var(--color-correct-bg)';
+                  cardClass += ' is-correct';
                   statusBadge = '✓ Correct';
                 } else if (feedbackStatus === 'incorrect') {
-                  borderColor = 'var(--color-incorrect-border)';
-                  bgColor = 'var(--color-incorrect-bg)';
+                  cardClass += ' is-incorrect';
                   statusBadge = '× Selected';
                 }
               } else {
-                // Selected but not yet submitted
-                borderColor = 'var(--color-burgundy)';
-                bgColor = 'rgba(137, 1, 0, 0.05)';
+                cardClass += ' is-selected';
                 statusBadge = 'Selected';
               }
             }
@@ -258,69 +251,54 @@ export default function QuestionScreen({
               <button
                 key={idx}
                 type="button"
+                className={cardClass}
                 disabled={isAnswerSubmitted}
                 onClick={() => handleSelectOption(idx)}
-                style={{
-                  width: '100%',
-                  minHeight: '60px',
-                  padding: '12px 18px',
-                  backgroundColor: bgColor,
-                  backgroundImage: "url('/images/paper-texture.png')",
-                  backgroundSize: 'cover',
-                  border: `1.5px solid ${borderColor}`,
-                  borderRadius: 'var(--radius-md)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: '14px',
-                  textAlign: 'left',
-                  cursor: isAnswerSubmitted ? 'default' : 'pointer',
-                  boxShadow: isSelected ? '0 2px 8px rgba(107, 88, 68, 0.15)' : 'var(--shadow-card)',
-                  transform: isSelected ? 'scale(0.99)' : 'scale(1)',
-                  transition: 'border-color 0.15s ease, background-color 0.15s ease, transform 0.1s ease',
-                  outline: 'none'
-                }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-                  {/* Letter marker badge */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  {/* Letter marker badge matching Figma 13:153 */}
                   <span
                     style={{
                       width: '32px',
                       height: '32px',
+                      minWidth: '32px',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      backgroundColor: isSelected ? 'var(--color-burgundy)' : 'rgba(107, 88, 68, 0.12)',
-                      color: isSelected ? '#FFFFFF' : 'var(--color-black)',
-                      borderRadius: 'var(--radius-sm)',
+                      backgroundColor: isSelected ? 'var(--color-burgundy)' : '#EFE3D0',
+                      color: isSelected ? '#FFFFFF' : '#000000',
+                      borderRadius: '4px',
                       fontFamily: 'var(--font-sans)',
-                      fontWeight: 700,
-                      fontSize: '14px'
+                      fontWeight: 600,
+                      fontSize: '14px',
+                      lineHeight: '20px',
+                      transition: 'background-color 0.15s ease, color 0.15s ease'
                     }}
                   >
                     {letter}
                   </span>
 
-                  {/* Option text */}
+                  {/* Option text matching Figma 13:155 */}
                   <span
                     style={{
                       fontFamily: 'var(--font-sans)',
-                      fontSize: '15px',
+                      fontSize: '16px',
                       fontWeight: 500,
-                      color: 'var(--color-black)'
+                      lineHeight: '24px',
+                      color: '#000000'
                     }}
                   >
                     {optionText}
                   </span>
                 </div>
 
-                {/* Selection Radio Indicator */}
+                {/* Selection indicator radio matching Figma 13:157 */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   {statusBadge && (
                     <span
                       style={{
                         fontFamily: 'var(--font-sans)',
-                        fontSize: '12px',
+                        fontSize: '13px',
                         fontWeight: 600,
                         color: feedbackStatus === 'correct' ? 'var(--color-correct-text)' : 'var(--color-burgundy)'
                       }}
@@ -333,11 +311,12 @@ export default function QuestionScreen({
                       width: '18px',
                       height: '18px',
                       borderRadius: '50%',
-                      border: `1.5px solid ${isSelected ? 'var(--color-burgundy)' : 'var(--border-parchment-dark)'}`,
-                      backgroundColor: isSelected ? 'var(--color-burgundy)' : 'transparent',
+                      border: `1.5px solid ${isSelected ? 'var(--color-burgundy)' : '#78654F'}`,
+                      backgroundColor: isSelected ? 'var(--color-burgundy)' : '#FFFBF3',
                       display: 'flex',
                       alignItems: 'center',
-                      justifyContent: 'center'
+                      justifyContent: 'center',
+                      transition: 'border-color 0.15s ease, background-color 0.15s ease'
                     }}
                   >
                     {isSelected && (
@@ -349,7 +328,7 @@ export default function QuestionScreen({
             );
           })}
 
-          {/* Submit Action or Feedback Notification */}
+          {/* One Submit Answer Action / One Feedback Area */}
           {!isAnswerSubmitted ? (
             <div
               style={{
