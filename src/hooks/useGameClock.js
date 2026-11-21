@@ -6,6 +6,9 @@ export const GET_READY_DURATION_MS = 10000;   // Final 10 seconds of lobby
 export const ANSWER_DURATION_MS = 10000;      // 10 seconds per question
 export const CLUE_TRIGGER_MS = 5000;          // Clue reveals at 5s elapsed if unanswered
 export const TOTAL_ROUNDS = 11;               // 10 regular + 1 Final Exhibit
+export const COMPILATION_DURATION_MS = 8000;  // 8 seconds for score tallying & compilation
+export const QUIZ_DURATION_MS = LOBBY_DURATION_MS + TOTAL_ROUNDS * ANSWER_DURATION_MS; // 200,000ms
+export const TOTAL_GAME_DURATION_MS = QUIZ_DURATION_MS + COMPILATION_DURATION_MS;       // 208,000ms
 
 /**
  * Authoritative Timestamp-Based Game Clock
@@ -15,25 +18,30 @@ export const TOTAL_ROUNDS = 11;               // 10 regular + 1 Final Exhibit
 export function useGameClock({
   startTime,
   serverTimeOffset = 0,
+  allScoresSubmitted = false,
+  totalPlayers = 0,
   onPhaseChange,
   onQuestionChange,
   onClueTrigger,
   onRoundTimeout,
   onGameComplete
 }) {
-  const [phase, setPhase] = useState('LOBBY_NORMAL'); // 'LOBBY_NORMAL' | 'LOBBY_GET_READY' | 'QUESTION' | 'LEADERBOARD'
+  const [phase, setPhase] = useState('LOBBY_NORMAL'); // 'LOBBY_NORMAL' | 'LOBBY_GET_READY' | 'QUESTION' | 'COMPILATION' | 'LEADERBOARD'
   const [currentRound, setCurrentRound] = useState(1);
   const [roundElapsedMs, setRoundElapsedMs] = useState(0);
   const [lobbyRemainingMs, setLobbyRemainingMs] = useState(LOBBY_DURATION_MS);
+  const [compilationRemainingMs, setCompilationRemainingMs] = useState(COMPILATION_DURATION_MS);
 
   const prevPhaseRef = useRef(phase);
   const prevRoundRef = useRef(currentRound);
   const clueTriggeredRef = useRef(false);
+  const scoreTriggeredRef = useRef(false);
 
   useEffect(() => {
     if (!startTime) {
       setPhase('LOBBY_NORMAL');
       setLobbyRemainingMs(LOBBY_DURATION_MS);
+      setCompilationRemainingMs(COMPILATION_DURATION_MS);
       return;
     }
 
@@ -62,8 +70,8 @@ export function useGameClock({
           setPhase('LOBBY_GET_READY');
           onPhaseChange && onPhaseChange('LOBBY_GET_READY');
         }
-      } else {
-        // Questions phase (totalElapsed >= 90s)
+      } else if (totalElapsed < QUIZ_DURATION_MS) {
+        // Questions phase (90s - 200s, 11 rounds of 10s)
         const questionPhaseElapsed = totalElapsed - LOBBY_DURATION_MS;
         const roundIndex = Math.floor(questionPhaseElapsed / ANSWER_DURATION_MS);
         const roundNumber = roundIndex + 1;
@@ -90,13 +98,36 @@ export function useGameClock({
             clueTriggeredRef.current = true;
             onClueTrigger && onClueTrigger(roundNumber);
           }
+        }
+      } else {
+        // Active questions complete (totalElapsed >= 200s)
+        // Automatically dispatch score submission immediately at T=200s
+        if (!scoreTriggeredRef.current) {
+          scoreTriggeredRef.current = true;
+          onGameComplete && onGameComplete();
+        }
+
+        // REQUIREMENT 6: Do not transition to the final leaderboard until Apps Script confirms that every registered player has submitted their score
+        const isLeaderboardReady = totalPlayers > 0
+          ? (allScoresSubmitted && totalElapsed >= (QUIZ_DURATION_MS + 2500))
+          : (totalElapsed >= TOTAL_GAME_DURATION_MS);
+
+        if (!isLeaderboardReady) {
+          // Stay in Compilation phase while scores are still pending
+          const remaining = Math.max(0, TOTAL_GAME_DURATION_MS - totalElapsed);
+          setCompilationRemainingMs(remaining);
+
+          if (prevPhaseRef.current !== 'COMPILATION') {
+            prevPhaseRef.current = 'COMPILATION';
+            setPhase('COMPILATION');
+            onPhaseChange && onPhaseChange('COMPILATION');
+          }
         } else {
-          // All 11 rounds complete -> Leaderboard
+          // Transition to Authoritative Leaderboard once all scores are confirmed by backend
           if (prevPhaseRef.current !== 'LEADERBOARD') {
             prevPhaseRef.current = 'LEADERBOARD';
             setPhase('LEADERBOARD');
             onPhaseChange && onPhaseChange('LEADERBOARD');
-            onGameComplete && onGameComplete();
           }
         }
       }
@@ -109,13 +140,15 @@ export function useGameClock({
     return () => {
       cancelAnimationFrame(animFrameId);
     };
-  }, [startTime, serverTimeOffset, onPhaseChange, onQuestionChange, onClueTrigger, onRoundTimeout, onGameComplete]);
+  }, [startTime, serverTimeOffset, allScoresSubmitted, totalPlayers, onPhaseChange, onQuestionChange, onClueTrigger, onRoundTimeout, onGameComplete]);
 
   return {
     phase,
     currentRound,
     roundElapsedMs,
     roundRemainingMs: Math.max(0, ANSWER_DURATION_MS - roundElapsedMs),
-    lobbyRemainingMs
+    lobbyRemainingMs,
+    compilationRemainingMs,
+    COMPILATION_DURATION_MS
   };
 }

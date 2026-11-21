@@ -21,39 +21,8 @@ export default function LeaderboardScreen({
     }
   }, [playWinnerReveal]);
 
-  // Clone returned leaderboard data
+  // 1. Authoritative leaderboard list directly from backend data (NEVER inject or mutate locally)
   let list = Array.isArray(leaderboardData) && leaderboardData.length > 0 ? [...leaderboardData] : [];
-
-  // Helper: check if a leaderboard entry belongs to the viewing player
-  const isCurrentPlayer = (investigator) => {
-    if (isProjectorView || !currentPlayerName || !investigator) return false;
-    if (currentPlayerRowIndex && investigator.rowIndex) {
-      return investigator.rowIndex === currentPlayerRowIndex;
-    }
-    return String(investigator.name).toLowerCase() === currentPlayerName.toLowerCase();
-  };
-
-  // If on player view and current player has a score, ensure current player is present in ranking
-  if (!isProjectorView && currentPlayerName) {
-    const existingIdx = currentPlayerRowIndex
-      ? list.findIndex((p) => p.rowIndex === currentPlayerRowIndex)
-      : list.findIndex((p) => String(p.name).toLowerCase() === currentPlayerName.toLowerCase());
-
-    if (existingIdx !== -1) {
-      list[existingIdx].score = Math.max(list[existingIdx].score, currentPlayerScore);
-      if (currentPlayerRowIndex && !list[existingIdx].rowIndex) {
-        list[existingIdx].rowIndex = currentPlayerRowIndex;
-      }
-    } else {
-      list.push({
-        id: `row-${currentPlayerRowIndex || 'me'}`,
-        rowIndex: currentPlayerRowIndex || null,
-        name: currentPlayerName,
-        score: currentPlayerScore,
-        timestamp: new Date().toISOString()
-      });
-    }
-  }
 
   // Sort descending by score; tiebreaker: earlier registration timestamp wins
   list.sort((a, b) => {
@@ -65,11 +34,29 @@ export default function LeaderboardScreen({
     return timeA - timeB;
   });
 
-  // Calculate current player's overall rank
+  // 2. Identify the player's personal result strictly by their assigned rowIndex
+  const isCurrentPlayer = (investigator) => {
+    if (isProjectorView || !currentPlayerName || !investigator) return false;
+    if (currentPlayerRowIndex && investigator.rowIndex) {
+      return investigator.rowIndex === currentPlayerRowIndex;
+    }
+    return !currentPlayerRowIndex && String(investigator.name).toLowerCase() === currentPlayerName.toLowerCase();
+  };
+
+  const myRecord = (!isProjectorView && currentPlayerRowIndex)
+    ? list.find((p) => p.rowIndex === currentPlayerRowIndex)
+    : null;
+
+  // Calculate actual global rank from the complete authoritative player list
   const myRankIndex = currentPlayerName
     ? list.findIndex((p) => isCurrentPlayer(p))
     : -1;
   const myRank = myRankIndex !== -1 ? myRankIndex + 1 : null;
+
+  // Displayed score is authoritative from backend (or currentPlayerScore as local reference)
+  const displayScore = myRecord && myRecord.hasScore
+    ? myRecord.score
+    : currentPlayerScore;
 
   // Podium positions (1st, 2nd, 3rd)
   const firstPlace = list[0] || { name: '—', score: 0 };
@@ -173,7 +160,7 @@ export default function LeaderboardScreen({
                   Final Score
                 </span>
                 <span style={{ fontFamily: 'var(--font-sans)', fontWeight: 700, fontSize: 'clamp(20px, 3vw, 28px)', color: 'var(--color-burgundy)' }}>
-                  {currentPlayerScore.toLocaleString()}
+                  {displayScore.toLocaleString()}
                 </span>
               </div>
 

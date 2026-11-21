@@ -2,20 +2,24 @@
  * Google Apps Script Backend Service Adapter
  * Endpoint configured via VITE_APPS_SCRIPT_URL.
  * Supports logical operations: join, state, submitScore, leaderboard.
- * Concurrency protections:
- * - Client-side request IDs & persistent client idempotency keys
- * - Staggered initial join delay (~0.5s per browser) to prevent request bursts
- * - Staggered final score submissions (0-1.5s delay)
- * - Exponential backoff with random jitter for transient errors (1-2s, 2-4s, 4-7s; max 3 retries)
- * - Synchronises client clock with server timestamp
- * - 3-column Google Sheet structure: [Timestamp, Name, Score]
+ * Concurrency & Synchronisation protections:
+ * - Unique session ID (sessionId) to distinguish fresh sessions from in-session page refreshes
+ * - Shared authoritative lobbyStartTime anchored to Player 1's server registration
+ * - Fallback anchor: derives lobbyStartTime from first player's timestamp in Google Sheet
+ * - Unique request ID (requestId) per intentional join attempt for retry idempotency
+ * - Spreadsheet row index (rowIndex) player identification (strictly 3 columns: Timestamp, Name, Score)
+ * - Staggered initial join delay (~0.5s) and staggered score submissions (0-1.5s)
+ * - Exponential backoff with random jitter on transient failures (max 3 retries)
+ * - Clock skew synchronization via serverTimeOffset
  */
 
 export const APPS_SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || '';
 
 export const STORAGE_KEYS = {
   CLIENT_ID: 'canva_trial_2026_client_id',
+  SESSION_ID: 'canva_trial_2026_session_id',
   ROW_INDEX: 'canva_trial_2026_row_index',
+  REQUEST_ID: 'canva_trial_2026_request_id',
   START_TIME: 'canva_trial_2026_start_time',
   PLAYER_NAME: 'canva_trial_2026_player_name',
   PLAYER_SCORE: 'canva_trial_2026_player_score',
@@ -64,20 +68,33 @@ export function parseLeaderboardRows(rawInput) {
   const valid = list
     .filter((row) => row && row.name && row.name !== 'Name' && String(row.name).trim() !== '')
     .map((row, index) => {
-      // Column 3 (Score) is keyed as 'stoppedAt' or 'score' in Apps Script output
+      // Column 3 (Score) is keyed as 'score' or legacy 'stoppedAt' in Apps Script output
+      // A blank score is pending; only valid numeric scores count as submitted
       const rawScore = row.score !== undefined ? row.score : row.stoppedAt;
-      const score = typeof rawScore === 'number'
-        ? rawScore
-        : rawScore === '' || rawScore === null || rawScore === undefined
-          ? 0
-          : parseInt(String(rawScore), 10) || 0;
+      const isBlank = rawScore === '' || rawScore === null || rawScore === undefined;
+      let isValidNumeric = false;
+      let scoreVal = 0;
+
+      if (!isBlank) {
+        if (typeof rawScore === 'number' && isFinite(rawScore)) {
+          isValidNumeric = true;
+          scoreVal = rawScore;
+        } else if (typeof rawScore === 'string' && rawScore.trim() !== '') {
+          const parsed = Number(rawScore.trim());
+          if (!isNaN(parsed) && isFinite(parsed)) {
+            isValidNumeric = true;
+            scoreVal = parsed;
+          }
+        }
+      }
 
       return {
-        id: `row-${row.rowIndex || index}`,
-        rowIndex: row.rowIndex || null,
+        id: `row-${row.rowIndex || index + 2}`,
+        rowIndex: row.rowIndex || index + 2,
         name: String(row.name).trim(),
-        score: score,
-        hasScore: rawScore !== '' && rawScore !== null && rawScore !== undefined,
+        score: scoreVal,
+        hasScore: isValidNumeric,
+        isPending: !isValidNumeric,
         timestamp: row.timestamp || ''
       };
     });
@@ -95,7 +112,7 @@ export function parseLeaderboardRows(rawInput) {
 
 /**
  * Fetch current state or leaderboard from Google Apps Script.
- * Synchronises server time and extracts the shared session lobbyStartTime.
+ * Extracts sessionId, shared session lobbyStartTime, and synchronises server clock.
  */
 export async function fetchBackendData() {
   if (!APPS_SCRIPT_URL) {
@@ -121,10 +138,15 @@ export async function fetchBackendData() {
 
     const data = await response.json();
     const clientRecvTime = Date.now();
+    const parsedPlayers = parseLeaderboardRows(data);
 
-    // Check if response contains serverTime for clock synchronization
     let serverTimeOffset = 0;
     let lobbyStartTime = null;
+    let sessionId = null;
+    let totalPlayers = parsedPlayers.length;
+    let scoresSubmitted = parsedPlayers.filter((p) => p.hasScore).length;
+    let scoresPending = totalPlayers - scoresSubmitted;
+    let allScoresSubmitted = (totalPlayers > 0) && (scoresPending === 0);
 
     if (data && typeof data === 'object' && !Array.isArray(data)) {
       if (typeof data.serverTime === 'number') {
@@ -137,13 +159,43 @@ export async function fetchBackendData() {
           ? data.lobbyStartTime
           : new Date(data.lobbyStartTime).getTime();
       }
+      if (data.sessionId) {
+        sessionId = data.sessionId;
+      }
+      if (typeof data.totalPlayers === 'number') {
+        totalPlayers = data.totalPlayers;
+      }
+      if (typeof data.scoresSubmitted === 'number') {
+        scoresSubmitted = data.scoresSubmitted;
+      }
+      if (typeof data.scoresPending === 'number') {
+        scoresPending = data.scoresPending;
+      }
+      if (typeof data.allScoresSubmitted === 'boolean') {
+        allScoresSubmitted = data.allScoresSubmitted;
+      }
+    }
+
+    // CRITICAL FAIL-SAFE FOR SHARED COUNTDOWN:
+    // If backend did not return top-level lobbyStartTime (e.g. running older Apps Script or legacy array),
+    // derive lobbyStartTime directly from the first registered player in the spreadsheet!
+    if (!lobbyStartTime && parsedPlayers.length > 0 && parsedPlayers[0].timestamp) {
+      const firstPlayerTs = new Date(parsedPlayers[0].timestamp).getTime();
+      if (!isNaN(firstPlayerTs) && firstPlayerTs > 0) {
+        lobbyStartTime = firstPlayerTs;
+      }
     }
 
     return {
       raw: data,
-      players: parseLeaderboardRows(data),
+      players: parsedPlayers,
       lobbyStartTime: lobbyStartTime,
-      serverTimeOffset: serverTimeOffset
+      serverTimeOffset: serverTimeOffset,
+      sessionId: sessionId,
+      totalPlayers: totalPlayers,
+      scoresSubmitted: scoresSubmitted,
+      scoresPending: scoresPending,
+      allScoresSubmitted: allScoresSubmitted
     };
   } catch (error) {
     console.warn('Backend fetch error (falling back to local state):', error.message);
@@ -155,7 +207,7 @@ export async function fetchBackendData() {
  * Register a new player name with the backend.
  * 1. Validates nickname
  * 2. Staggers initial request (~0.5s random delay) to prevent QR-scan request bursts
- * 3. Sends unique request ID with client idempotency key
+ * 3. Sends unique request ID (requestId) for retry idempotency
  * 4. Retries with exponential backoff and random jitter on transient failures (max 3 retries)
  */
 export async function registerPlayer(nickname) {
@@ -164,21 +216,27 @@ export async function registerPlayer(nickname) {
     return { success: false, error: 'Nickname is required' };
   }
 
-  // 1. Stagger initial registration request: 300ms to 700ms (~0.5s average) per browser
-  const staggerDelayMs = Math.floor(300 + Math.random() * 400);
+  // 1. Stagger initial registration request: 0 to 5 seconds random delay per browser
+  // Flattens the request arrival curve so simultaneous QR code join spikes do not overwhelm Google Apps Script
+  const staggerDelayMs = Math.floor(Math.random() * 5000);
   await sleep(staggerDelayMs);
 
   if (!APPS_SCRIPT_URL) {
+    const localReqId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+    localStorage.setItem(STORAGE_KEYS.REQUEST_ID, localReqId);
     return {
       success: true,
       localOnly: true,
+      sessionId: 'sess_local_' + Date.now(),
       lobbyStartTime: Date.now(),
-      rowIndex: 1
+      rowIndex: 1,
+      requestId: localReqId
     };
   }
 
   const clientId = getClientId();
-  const requestId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+  const requestId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+  localStorage.setItem(STORAGE_KEYS.REQUEST_ID, requestId);
 
   const payload = JSON.stringify({
     action: 'join',
@@ -221,11 +279,25 @@ export async function registerPlayer(nickname) {
         // Response succeeded without parseable JSON
       }
 
+      // Check if backend rejected late join
+      if (resData && resData.status === 'error' && resData.code === 'LOBBY_CLOSED') {
+        return {
+          success: false,
+          isLobbyClosed: true,
+          error: resData.message || 'The investigation has already begun. Watch the main screen.'
+        };
+      }
+
       let lobbyStartTime = null;
       let rowIndex = null;
       let serverTimeOffset = 0;
+      let sessionId = null;
+      let savedRequestId = requestId;
 
       if (resData && typeof resData === 'object') {
+        if (resData.sessionId) {
+          sessionId = resData.sessionId;
+        }
         if (resData.lobbyStartTime) {
           lobbyStartTime = typeof resData.lobbyStartTime === 'number'
             ? resData.lobbyStartTime
@@ -236,14 +308,25 @@ export async function registerPlayer(nickname) {
         } else if (resData.rowIndex) {
           rowIndex = resData.rowIndex;
         }
+        if (resData.player && resData.player.requestId) {
+          savedRequestId = resData.player.requestId;
+        } else if (resData.requestId) {
+          savedRequestId = resData.requestId;
+        }
         if (typeof resData.serverTime === 'number') {
           const rtt = (clientRecvTime - clientSendTime) / 2;
           serverTimeOffset = Math.round(resData.serverTime - (clientSendTime + rtt));
         }
       }
 
+      if (sessionId) {
+        localStorage.setItem(STORAGE_KEYS.SESSION_ID, sessionId);
+      }
       if (rowIndex) {
         localStorage.setItem(STORAGE_KEYS.ROW_INDEX, String(rowIndex));
+      }
+      if (savedRequestId) {
+        localStorage.setItem(STORAGE_KEYS.REQUEST_ID, savedRequestId);
       }
       if (lobbyStartTime) {
         localStorage.setItem(STORAGE_KEYS.START_TIME, String(lobbyStartTime));
@@ -254,8 +337,10 @@ export async function registerPlayer(nickname) {
 
       return {
         success: true,
+        sessionId: sessionId,
         lobbyStartTime: lobbyStartTime,
         rowIndex: rowIndex,
+        requestId: savedRequestId,
         serverTimeOffset: serverTimeOffset
       };
     } catch (err) {
@@ -292,13 +377,35 @@ export async function submitFinalScore(nickname, score, targetRowIndex = null) {
 
   const clientId = getClientId();
   const savedRowIndex = targetRowIndex || parseInt(localStorage.getItem(STORAGE_KEYS.ROW_INDEX) || '0', 10) || null;
+  const sessionId = localStorage.getItem(STORAGE_KEYS.SESSION_ID) || null;
+  const requestId = localStorage.getItem(STORAGE_KEYS.REQUEST_ID) || null;
+
+  // Strict validation: never attempt score submission without a valid assigned rowIndex
+  if (!savedRowIndex || isNaN(savedRowIndex) || savedRowIndex <= 1) {
+    console.error('Cannot submit score: missing or invalid assigned rowIndex for player', nickname);
+    return { success: false, error: 'Missing or invalid assigned row identifier' };
+  }
+
+  // Strict score validation: must be a valid finite number (numeric zero is accepted)
+  if (score === undefined || score === null || typeof score !== 'number' || !isFinite(score)) {
+    console.error('Cannot submit score: score must be a finite number, received', score);
+    return { success: false, error: 'Score must be a valid finite number' };
+  }
+
+  // Strict identity token validation: original registration requestId must be present
+  if (!requestId || String(requestId).trim() === '') {
+    console.error('Cannot submit score: missing original registration requestId for player', nickname);
+    return { success: false, error: 'Missing registration request identifier' };
+  }
 
   const payload = JSON.stringify({
     action: 'submitScore',
     clientId: clientId,
+    sessionId: sessionId,
+    requestId: requestId,
     rowIndex: savedRowIndex,
     name: nickname,
-    score: typeof score === 'number' ? score : 0,
+    score: score,
     timestamp: new Date().toISOString()
   });
 
@@ -324,7 +431,16 @@ export async function submitFinalScore(nickname, score, targetRowIndex = null) {
         throw new Error(`Server returned HTTP ${response.status}`);
       }
 
-      return { success: true };
+      let resData = null;
+      try {
+        resData = await response.json();
+      } catch (_) {}
+
+      if (resData && resData.status === 'error') {
+        throw new Error(resData.message || 'Score submission rejected');
+      }
+
+      return { success: true, rowIndex: savedRowIndex };
     } catch (err) {
       lastError = err;
       if (attempt < retryDelays.length) {

@@ -2,10 +2,18 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import JoinScreen from './screens/JoinScreen';
 import LobbyScreen from './screens/LobbyScreen';
 import QuestionScreen from './screens/QuestionScreen';
+import CompilationScreen from './screens/CompilationScreen';
 import LeaderboardScreen from './screens/LeaderboardScreen';
 import MagnifyingLens from './components/MagnifyingLens';
 import { QUESTIONS, TOTAL_ROUNDS } from './data/questions';
-import { useGameClock, LOBBY_DURATION_MS, ANSWER_DURATION_MS } from './hooks/useGameClock';
+import {
+  useGameClock,
+  LOBBY_DURATION_MS,
+  ANSWER_DURATION_MS,
+  COMPILATION_DURATION_MS,
+  QUIZ_DURATION_MS,
+  TOTAL_GAME_DURATION_MS
+} from './hooks/useGameClock';
 import {
   fetchBackendData,
   registerPlayer,
@@ -14,9 +22,7 @@ import {
   INITIAL_INVESTIGATORS
 } from './services/api';
 
-// Total active quiz game time: 90s lobby + 11 rounds * 10s = 200s (200,000ms)
-const TOTAL_GAME_DURATION_MS = LOBBY_DURATION_MS + TOTAL_ROUNDS * ANSWER_DURATION_MS;
-const SESSION_EXPIRY_MS = TOTAL_GAME_DURATION_MS + 40000; // 240,000ms (4 minutes)
+const SESSION_EXPIRY_MS = TOTAL_GAME_DURATION_MS + 60000; // 268,000ms (~4.5 minutes)
 
 // Clean path helper for exact pathname matching
 function normalizePath(pathname) {
@@ -31,7 +37,12 @@ function clearStoredSession() {
   localStorage.removeItem(STORAGE_KEYS.PLAYER_SCORE);
   localStorage.removeItem(STORAGE_KEYS.ROSTER);
   localStorage.removeItem(STORAGE_KEYS.ROW_INDEX);
+  localStorage.removeItem(STORAGE_KEYS.REQUEST_ID);
   localStorage.removeItem(STORAGE_KEYS.TIME_OFFSET);
+  localStorage.removeItem(STORAGE_KEYS.SESSION_ID);
+  if (typeof sessionStorage !== 'undefined') {
+    sessionStorage.clear();
+  }
 }
 
 export default function App() {
@@ -55,7 +66,12 @@ export default function App() {
     return saved ? parseInt(saved, 10) || 0 : 0;
   });
 
-  // 3. State initialization with automatic stale session cleanup
+  // 3. Unique game session ID
+  const [sessionId, setSessionId] = useState(() => {
+    return localStorage.getItem(STORAGE_KEYS.SESSION_ID) || null;
+  });
+
+  // 4. State initialization with automatic stale session cleanup
   const [playerName, setPlayerName] = useState(() => {
     const savedStartTime = localStorage.getItem(STORAGE_KEYS.START_TIME);
     if (savedStartTime) {
@@ -92,6 +108,10 @@ export default function App() {
   const [leaderboardRows, setLeaderboardRows] = useState([]);
   const [isLateJoin, setIsLateJoin] = useState(false);
   const [isFinalising, setIsFinalising] = useState(false);
+  const [totalPlayers, setTotalPlayers] = useState(0);
+  const [scoresSubmitted, setScoresSubmitted] = useState(0);
+  const [scoresPending, setScoresPending] = useState(0);
+  const [allScoresSubmitted, setAllScoresSubmitted] = useState(false);
   const scoreSubmittedRef = useRef(false);
 
   // Hook into shared authoritative timestamp clock
@@ -100,10 +120,13 @@ export default function App() {
     currentRound,
     roundElapsedMs,
     roundRemainingMs,
-    lobbyRemainingMs
+    lobbyRemainingMs,
+    compilationRemainingMs
   } = useGameClock({
     startTime: startTime,
     serverTimeOffset: serverTimeOffset,
+    allScoresSubmitted: allScoresSubmitted,
+    totalPlayers: totalPlayers,
     onGameComplete: () => {
       if (playerName && !scoreSubmittedRef.current) {
         scoreSubmittedRef.current = true;
@@ -112,18 +135,18 @@ export default function App() {
     }
   });
 
-  // 4. Staggered Polling & Authoritative Session Sync
+  // 5. Staggered Polling, Session Reconciler & Authoritative Sync
   // Polling rules:
-  // - Staggered initial delay: 500-1500ms
+  // - Staggered initial delay: 300-800ms
   // - Lobby interval: 6-8s with random jitter
   // - Active questions (phase === 'QUESTION'): PAUSED completely
-  // - Leaderboard: brief rapid refresh (3-4s for first 15s) to finalize scores
+  // - Compilation & Leaderboard: rapid refresh (2-3.5s) to aggregate all incoming scores
   useEffect(() => {
     let isMounted = true;
     let timeoutId = null;
     let finalisingTimer = null;
 
-    if (phase === 'LEADERBOARD') {
+    if (phase === 'COMPILATION' || phase === 'LEADERBOARD') {
       setIsFinalising(true);
       finalisingTimer = setTimeout(() => {
         if (isMounted) setIsFinalising(false);
@@ -143,19 +166,73 @@ export default function App() {
           setServerTimeOffset(data.serverTimeOffset);
         }
 
-        // Session reset detection:
-        // If the backend has a new session or reset lobbyStartTime, reconcile state
-        if (data.lobbyStartTime) {
-          if (startTime && Math.abs(data.lobbyStartTime - startTime) > 5000) {
-            // Backend session changed (e.g. sheet cleared for fresh game)
+        const backendSessionId = data.sessionId;
+        const hasBackendSession = !!(data.lobbyStartTime || (data.players && data.players.length > 0));
+
+        // Session Transition Reconciler:
+        if (!hasBackendSession) {
+          // Backend has NO active session (sheet was reset or cleared by editor)
+          if (sessionId || startTime || playerName) {
             clearStoredSession();
-            setStartTime(data.lobbyStartTime);
+            setSessionId(null);
+            setStartTime(null);
+            setPlayerName('');
+            setPlayerScore(0);
             setPlayerRowIndex(null);
+            setInvestigators([]);
+            setLeaderboardRows([]);
+            setIsLateJoin(false);
+            setTotalPlayers(0);
+            setScoresSubmitted(0);
+            setScoresPending(0);
+            setAllScoresSubmitted(false);
             scoreSubmittedRef.current = false;
-          } else if (!startTime) {
+          }
+        } else if (backendSessionId && sessionId && backendSessionId !== sessionId) {
+          // Genuinely NEW game session started on backend! Purge old session completely!
+          clearStoredSession();
+          setSessionId(backendSessionId);
+          localStorage.setItem(STORAGE_KEYS.SESSION_ID, backendSessionId);
+          setStartTime(data.lobbyStartTime);
+          if (data.lobbyStartTime) {
+            localStorage.setItem(STORAGE_KEYS.START_TIME, String(data.lobbyStartTime));
+          }
+          setPlayerName('');
+          setPlayerScore(0);
+          setPlayerRowIndex(null);
+          setInvestigators(data.players ? data.players.map((p) => p.name).filter(Boolean) : []);
+          setLeaderboardRows(data.players || []);
+          setIsLateJoin(false);
+          setTotalPlayers(typeof data.totalPlayers === 'number' ? data.totalPlayers : 0);
+          setScoresSubmitted(typeof data.scoresSubmitted === 'number' ? data.scoresSubmitted : 0);
+          setScoresPending(typeof data.scoresPending === 'number' ? data.scoresPending : 0);
+          setAllScoresSubmitted(!!data.allScoresSubmitted);
+          scoreSubmittedRef.current = false;
+        } else if (backendSessionId && !sessionId) {
+          // Discovered active session on mount
+          setSessionId(backendSessionId);
+          localStorage.setItem(STORAGE_KEYS.SESSION_ID, backendSessionId);
+          if (data.lobbyStartTime) {
             setStartTime(data.lobbyStartTime);
             localStorage.setItem(STORAGE_KEYS.START_TIME, String(data.lobbyStartTime));
           }
+        } else if (data.lobbyStartTime && !startTime) {
+          setStartTime(data.lobbyStartTime);
+          localStorage.setItem(STORAGE_KEYS.START_TIME, String(data.lobbyStartTime));
+        }
+
+        // Sync compilation and score submission metrics from backend
+        if (typeof data.totalPlayers === 'number') {
+          setTotalPlayers(data.totalPlayers);
+        }
+        if (typeof data.scoresSubmitted === 'number') {
+          setScoresSubmitted(data.scoresSubmitted);
+        }
+        if (typeof data.scoresPending === 'number') {
+          setScoresPending(data.scoresPending);
+        }
+        if (typeof data.allScoresSubmitted === 'boolean') {
+          setAllScoresSubmitted(data.allScoresSubmitted);
         }
 
         // Update leaderboard data
@@ -163,7 +240,7 @@ export default function App() {
           setLeaderboardRows(data.players);
 
           // Update active roster directly from backend players (NO stale localStorage name merging!)
-          // Retains duplicate nicknames properly as separate entries!
+          // Retains duplicate nicknames properly as separate entries
           const backendNames = data.players.map((p) => p.name).filter(Boolean);
           const currentList = playerName && !backendNames.includes(playerName)
             ? [playerName, ...backendNames]
@@ -175,16 +252,18 @@ export default function App() {
 
       // Schedule next polling interval
       if (isMounted && phase !== 'QUESTION') {
-        const nextDelayMs = phase === 'LEADERBOARD'
-          ? 3000 + Math.floor(Math.random() * 1500) // 3-4.5s rapid refresh on leaderboard
-          : 6000 + Math.floor(Math.random() * 2000); // 6-8s during lobby
+        const nextDelayMs = phase === 'COMPILATION'
+          ? 2000 + Math.floor(Math.random() * 500) // 2-2.5s rapid refresh during compilation
+          : phase === 'LEADERBOARD'
+            ? 3000 + Math.floor(Math.random() * 1500) // 3-4.5s rapid refresh on leaderboard
+            : 6000 + Math.floor(Math.random() * 2000); // 6-8s during lobby
 
         timeoutId = setTimeout(poll, nextDelayMs);
       }
     };
 
-    // Stagger initial request by 400-1200ms
-    const initialDelayMs = 400 + Math.floor(Math.random() * 800);
+    // Stagger initial request by 300-800ms
+    const initialDelayMs = 300 + Math.floor(Math.random() * 500);
     timeoutId = setTimeout(poll, initialDelayMs);
 
     return () => {
@@ -192,16 +271,16 @@ export default function App() {
       if (timeoutId) clearTimeout(timeoutId);
       if (finalisingTimer) clearTimeout(finalisingTimer);
     };
-  }, [phase, startTime, playerName]);
+  }, [phase, startTime, playerName, sessionId]);
 
-  // 5. Late joiner detection:
+  // 6. Late joiner detection:
   // ONLY true when game is actively in question phase (elapsed >= 90s && elapsed < 200s) AND visitor has not registered
   useEffect(() => {
     if (startTime && !isProjectorView) {
       const checkLate = () => {
         const now = Date.now() + serverTimeOffset;
         const elapsed = now - startTime;
-        if (!playerName && elapsed >= LOBBY_DURATION_MS && elapsed < TOTAL_GAME_DURATION_MS) {
+        if (!playerName && elapsed >= LOBBY_DURATION_MS && elapsed < QUIZ_DURATION_MS) {
           setIsLateJoin(true);
         } else {
           setIsLateJoin(false);
@@ -220,6 +299,9 @@ export default function App() {
     // 1. Call backend registration with ~0.5s stagger, client ID & retry safety
     const res = await registerPlayer(nickname);
     if (!res.success) {
+      if (res.isLobbyClosed) {
+        setIsLateJoin(true);
+      }
       return { success: false, error: res.error };
     }
 
@@ -227,20 +309,35 @@ export default function App() {
     setPlayerName(nickname);
     localStorage.setItem(STORAGE_KEYS.PLAYER_NAME, nickname);
 
+    if (res.sessionId) {
+      setSessionId(res.sessionId);
+      localStorage.setItem(STORAGE_KEYS.SESSION_ID, res.sessionId);
+    }
+
     if (res.rowIndex) {
       setPlayerRowIndex(res.rowIndex);
       localStorage.setItem(STORAGE_KEYS.ROW_INDEX, String(res.rowIndex));
     }
 
     // 3. Synchronise authoritative lobby start time
-    if (res.lobbyStartTime) {
-      setStartTime(res.lobbyStartTime);
-      localStorage.setItem(STORAGE_KEYS.START_TIME, String(res.lobbyStartTime));
-    } else if (!startTime) {
-      const now = Date.now() + (res.serverTimeOffset || serverTimeOffset);
-      setStartTime(now);
-      localStorage.setItem(STORAGE_KEYS.START_TIME, String(now));
+    let authoritativeStart = res.lobbyStartTime || startTime;
+    if (!authoritativeStart) {
+      // Query backend state immediately to receive Player 1's timestamp if not in join response
+      const latestData = await fetchBackendData();
+      if (latestData && latestData.lobbyStartTime) {
+        authoritativeStart = latestData.lobbyStartTime;
+        if (latestData.sessionId) {
+          setSessionId(latestData.sessionId);
+          localStorage.setItem(STORAGE_KEYS.SESSION_ID, latestData.sessionId);
+        }
+      } else {
+        // Player 1 establishing start time
+        authoritativeStart = Date.now() + (res.serverTimeOffset || serverTimeOffset);
+      }
     }
+
+    setStartTime(authoritativeStart);
+    localStorage.setItem(STORAGE_KEYS.START_TIME, String(authoritativeStart));
 
     if (res.serverTimeOffset) {
       setServerTimeOffset(res.serverTimeOffset);
@@ -265,6 +362,26 @@ export default function App() {
 
   // ROUTE 1: Public Projector View (/leaderboard)
   if (isProjectorView) {
+    if (phase === 'COMPILATION') {
+      return (
+        <>
+          <MagnifyingLens />
+          <CompilationScreen
+            remainingMs={compilationRemainingMs}
+            totalDurationMs={COMPILATION_DURATION_MS}
+            playerName=""
+            playerScore={0}
+            isProjectorView={true}
+            isSubmitted={true}
+            totalPlayers={totalPlayers}
+            scoresSubmitted={scoresSubmitted}
+            scoresPending={scoresPending}
+            allScoresSubmitted={allScoresSubmitted}
+          />
+        </>
+      );
+    }
+
     return (
       <>
         <MagnifyingLens />
@@ -327,7 +444,28 @@ export default function App() {
     );
   }
 
-  // Stage 4: Personal Final Results Screen
+  // Stage 4: Case Compilation Screen
+  if (phase === 'COMPILATION') {
+    return (
+      <>
+        <MagnifyingLens />
+        <CompilationScreen
+          remainingMs={compilationRemainingMs}
+          totalDurationMs={COMPILATION_DURATION_MS}
+          playerName={playerName}
+          playerScore={playerScore}
+          isProjectorView={false}
+          isSubmitted={scoreSubmittedRef.current}
+          totalPlayers={totalPlayers}
+          scoresSubmitted={scoresSubmitted}
+          scoresPending={scoresPending}
+          allScoresSubmitted={allScoresSubmitted}
+        />
+      </>
+    );
+  }
+
+  // Stage 5: Final Authoritative Leaderboard Screen (T >= 208s)
   return (
     <>
       <MagnifyingLens />
