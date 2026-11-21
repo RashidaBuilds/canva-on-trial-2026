@@ -1,0 +1,58 @@
+:root {
+  /* Approved Palette */
+  --color-burgundy: #890100;
+  --color-burgundy-hover: #700100;
+  --color-black: #000000;
+  --color-ink-muted: #555555;
+  --color-ink-subtle: #777777;
+
+  --color-pink: #F8185C;
+  --color-pink-light: #FFCFCF;
+  --color-warm: #DB8236;
+
+  /* Surfaces */
+  --bg-cream: #F8F2E7;
+  --bg-parchment-card: #FFFBF3;
+  --bg-card-alt: #FDF9F0;
+  --bg-lobby-dark: #1F1010;
+  --bg-get-ready: #FAF6ED;
+
+  /* Borders & Dividers */
+  --border-parchment: #DECDB1;
+  --border-parchment-dark: #BFA98B;
+  --border-light: rgba(107, 88, 68, 0.18);
+
+  /* Feedback Colors */
+  --color-correct-text: #2E623D;
+  --color-correct-bg: #E8F1E7;
+  --color-correct-border: #386A45;
+
+  --color-incorrect-text: #890100;
+  --color-incorrect-bg: #F8E9E2;
+  --color-incorrect-border: #A3473D;
+
+  --color-clue-text: #6B5844;
+  --color-clue-bg: #FFF0CD;
+  --color-clue-border: #D8A600;
+
+  --color-gold: #B88927;
+  --color-silver: #737D85;
+  --color-bronze: #9E572E;
+
+  /* Typography */
+  --font-serif: 'Lora', Georgia, 'Times New Roman', serif;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* Shadows */
+  --shadow-card: 0 2px 10px rgba(107, 88, 68, 0.08), 0 1px 3px rgba(107, 88, 68, 0.05);
+  --shadow-podium: 0 4px 16px rgba(107, 88, 68, 0.12);
+
+  /* Transitions */
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.25s ease;
+}
