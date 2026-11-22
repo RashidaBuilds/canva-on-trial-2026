@@ -1,19 +1,27 @@
 /**
- * Google Apps Script Backend Service Adapter
- * Endpoint configured via VITE_APPS_SCRIPT_URL.
- * Supports logical operations: join, state, submitScore, leaderboard.
- * Concurrency & Synchronisation protections:
- * - Unique session ID (sessionId) to distinguish fresh sessions from in-session page refreshes
- * - Shared authoritative lobbyStartTime anchored to Player 1's server registration
- * - Fallback anchor: derives lobbyStartTime from first player's timestamp in Google Sheet
- * - Unique request ID (requestId) per intentional join attempt for retry idempotency
- * - Spreadsheet row index (rowIndex) player identification (strictly 3 columns: Timestamp, Name, Score)
- * - Staggered initial join delay (~0.5s) and staggered score submissions (0-1.5s)
- * - Exponential backoff with random jitter on transient failures (max 3 retries)
+ * Canva on Trial 2026 - Production API Service Adapter
+ * Connected to Vercel Serverless Functions and Supabase Backend.
+ * 
+ * Endpoints:
+ * - GET  /api/state: Shared session timer, countdown, compilation metrics & verified leaderboard
+ * - POST /api/join: Atomic player registration with 0-5s stagger & idempotency
+ * - POST /api/submit-score: Strict final score submission & verification
+ * - POST /api/reset: Clean game session reset
+ * 
+ * Invariants Preserved:
+ * - Unique session ID (sessionId)
+ * - Authoritative lobbyStartTime established once by Player 1
+ * - Unique request ID (requestId) per intentional registration attempt
+ * - Row index (rowIndex) for player row identification
+ * - Staggered initial join delay (0 to 5s) to flatten simultaneous QR spikes
+ * - Staggered score submission (0 to 1.5s)
+ * - Exponential backoff with random jitter on retries (max 3 retries)
  * - Clock skew synchronization via serverTimeOffset
+ * - Strict score validation (numeric zero is valid!)
+ * - Confirmation marked only upon explicit server verification
  */
 
-export const APPS_SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || '';
+export const API_BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_API_BASE_URL : null) || '/api';
 
 export const STORAGE_KEYS = {
   CLIENT_ID: 'canva_trial_2026_client_id',
@@ -43,7 +51,7 @@ export function markScoreConfirmed() {
   localStorage.setItem(STORAGE_KEYS.SCORE_CONFIRMED, 'true');
 }
 
-// Production: No hardcoded mock users. Populates with actual registered players from backend.
+// Production: Dynamic roster populated from active backend participants
 export const INITIAL_INVESTIGATORS = [];
 
 /**
@@ -66,8 +74,9 @@ export function getClientId() {
 }
 
 /**
- * Parse rows from Apps Script and extract valid leaderboard records.
+ * Parse rows from Supabase / Vercel API and extract valid leaderboard records.
  * Sorts in descending order of score.
+ * Confirmed scores are ranked strictly above pending records.
  * Tiebreaker: earlier registration timestamp wins the tie.
  */
 export function parseLeaderboardRows(rawInput) {
@@ -84,12 +93,15 @@ export function parseLeaderboardRows(rawInput) {
   const valid = list
     .filter((row) => row && row.name && row.name !== 'Name' && String(row.name).trim() !== '')
     .map((row, index) => {
-      // Column 3 (Score) is keyed as 'score' or legacy 'stoppedAt' in Apps Script output
-      // A blank score is pending; only valid numeric scores count as submitted
+      // Respect explicit backend flags
+      const explicitHasScore = typeof row.hasScore === 'boolean'
+        ? row.hasScore
+        : (typeof row.isPending === 'boolean' ? !row.isPending : null);
+
       const rawScore = row.score !== undefined ? row.score : row.stoppedAt;
       const isBlank = rawScore === '' || rawScore === null || rawScore === undefined;
       let isValidNumeric = false;
-      let scoreVal = 0;
+      let scoreVal = null;
 
       if (!isBlank) {
         if (typeof rawScore === 'number' && isFinite(rawScore)) {
@@ -104,19 +116,27 @@ export function parseLeaderboardRows(rawInput) {
         }
       }
 
+      // Final score status: must be explicitly confirmed by backend
+      const hasScoreFinal = explicitHasScore !== null ? (explicitHasScore && isValidNumeric) : isValidNumeric;
+
       return {
         id: `row-${row.rowIndex || index + 2}`,
         rowIndex: row.rowIndex || index + 2,
         name: String(row.name).trim(),
-        score: scoreVal,
-        hasScore: isValidNumeric,
-        isPending: !isValidNumeric,
+        score: hasScoreFinal ? (scoreVal !== null ? scoreVal : 0) : 0,
+        numericScore: hasScoreFinal ? scoreVal : null,
+        hasScore: hasScoreFinal,
+        isPending: !hasScoreFinal,
         timestamp: row.timestamp || ''
       };
     });
 
-  // Sort descending by score, tiebreak by earlier registration timestamp
+  // Sort descending by score (pending records placed after confirmed records)
+  // Tiebreaker: earlier registration timestamp wins
   return valid.sort((a, b) => {
+    if (a.hasScore !== b.hasScore) {
+      return a.hasScore ? -1 : 1;
+    }
     if (b.score !== a.score) {
       return b.score - a.score;
     }
@@ -130,21 +150,21 @@ export function parseLeaderboardRows(rawInput) {
 }
 
 /**
- * Fetch current state or leaderboard from Google Apps Script.
+ * Fetch current state or leaderboard from Supabase-backed API.
  * Extracts sessionId, shared session lobbyStartTime, and synchronises server clock.
  */
 export async function fetchBackendData() {
-  if (!APPS_SCRIPT_URL) {
-    return null;
-  }
-
   const clientSendTime = Date.now();
   try {
-    // Append cache-busting timestamp to prevent stale browser/proxy responses
-    const separator = APPS_SCRIPT_URL.includes('?') ? '&' : '?';
-    const url = `${APPS_SCRIPT_URL}${separator}t=${clientSendTime}`;
+    const storedSession = localStorage.getItem(STORAGE_KEYS.SESSION_ID) || '';
+    const queryParams = new URLSearchParams({
+      t: String(clientSendTime)
+    });
+    if (storedSession) {
+      queryParams.set('sessionId', storedSession);
+    }
 
-    const response = await fetch(url, {
+    const response = await fetch(`${API_BASE_URL}/state?${queryParams.toString()}`, {
       method: 'GET',
       headers: {
         'Accept': 'application/json'
@@ -195,16 +215,6 @@ export async function fetchBackendData() {
       }
     }
 
-    // CRITICAL FAIL-SAFE FOR SHARED COUNTDOWN:
-    // If backend did not return top-level lobbyStartTime (e.g. running older Apps Script or legacy array),
-    // derive lobbyStartTime directly from the first registered player in the spreadsheet!
-    if (!lobbyStartTime && parsedPlayers.length > 0 && parsedPlayers[0].timestamp) {
-      const firstPlayerTs = new Date(parsedPlayers[0].timestamp).getTime();
-      if (!isNaN(firstPlayerTs) && firstPlayerTs > 0) {
-        lobbyStartTime = firstPlayerTs;
-      }
-    }
-
     return {
       raw: data,
       players: parsedPlayers,
@@ -223,11 +233,11 @@ export async function fetchBackendData() {
 }
 
 /**
- * Register a new player name with the backend.
+ * Register a new player name with Supabase backend.
  * 1. Validates nickname
- * 2. Staggers initial request (~0.5s random delay) to prevent QR-scan request bursts
+ * 2. Staggers initial request (0 to 5s random delay) to prevent QR burst contention
  * 3. Sends unique request ID (requestId) for retry idempotency
- * 4. Retries with exponential backoff and random jitter on transient failures (max 3 retries)
+ * 4. Retries with exponential backoff and random jitter on transient failures
  */
 export async function registerPlayer(nickname) {
   const trimmed = (nickname || '').trim();
@@ -236,25 +246,8 @@ export async function registerPlayer(nickname) {
   }
 
   // 1. Stagger initial registration request: 0 to 5 seconds random delay per browser
-  // Flattens the request arrival curve so simultaneous QR code join spikes do not overwhelm Google Apps Script
   const staggerDelayMs = Math.floor(Math.random() * 5000);
   await sleep(staggerDelayMs);
-
-  if (!APPS_SCRIPT_URL) {
-    const localReqId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
-    localStorage.setItem(STORAGE_KEYS.REQUEST_ID, localReqId);
-    localStorage.setItem(STORAGE_KEYS.PLAYER_SCORE, '0');
-    localStorage.removeItem(STORAGE_KEYS.SCORE_CONFIRMED);
-    localStorage.removeItem(STORAGE_KEYS.QUESTION_HISTORY);
-    return {
-      success: true,
-      localOnly: true,
-      sessionId: 'sess_local_' + Date.now(),
-      lobbyStartTime: Date.now(),
-      rowIndex: 1,
-      requestId: localReqId
-    };
-  }
 
   const clientId = getClientId();
   const requestId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
@@ -264,7 +257,6 @@ export async function registerPlayer(nickname) {
   localStorage.removeItem(STORAGE_KEYS.QUESTION_HISTORY);
 
   const payload = JSON.stringify({
-    action: 'join',
     clientId: clientId,
     requestId: requestId,
     name: trimmed,
@@ -283,26 +275,20 @@ export async function registerPlayer(nickname) {
   for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
     try {
       const clientSendTime = Date.now();
-      const response = await fetch(APPS_SCRIPT_URL, {
+      const response = await fetch(`${API_BASE_URL}/join`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'text/plain;charset=utf-8'
+          'Content-Type': 'application/json'
         },
         body: payload
       });
 
       const clientRecvTime = Date.now();
 
-      if (!response.ok) {
-        throw new Error(`Server returned HTTP ${response.status}`);
-      }
-
       let resData = null;
       try {
         resData = await response.json();
-      } catch (e) {
-        // Response succeeded without parseable JSON
-      }
+      } catch (_) {}
 
       // Check if backend rejected late join
       if (resData && resData.status === 'error' && resData.code === 'LOBBY_CLOSED') {
@@ -311,6 +297,11 @@ export async function registerPlayer(nickname) {
           isLobbyClosed: true,
           error: resData.message || 'The investigation has already begun. Watch the main screen.'
         };
+      }
+
+      if (!response.ok) {
+        const errorMsg = (resData && resData.message) || `Server returned HTTP ${response.status}`;
+        throw new Error(errorMsg);
       }
 
       let lobbyStartTime = null;
@@ -388,8 +379,9 @@ export async function registerPlayer(nickname) {
 /**
  * Submit final score for a player with concurrency protection:
  * 1. Staggers submission across a 0-1.5s window to avoid simultaneous spikes
- * 2. Uses rowIndex to update player's existing row directly without appending
+ * 2. Uses rowIndex and requestId to update player's existing row directly
  * 3. Retries with exponential backoff and jitter
+ * 4. Confirms score only upon verified server confirmation
  */
 export async function submitFinalScore(
   nickname,
@@ -398,20 +390,9 @@ export async function submitFinalScore(
   overrideRequestId = null,
   overrideSessionId = null
 ) {
-  // If already confirmed by server, avoid redundant requests
-  if (isScoreConfirmed()) {
-    const confirmedRowIndex = targetRowIndex || parseInt(localStorage.getItem(STORAGE_KEYS.ROW_INDEX) || '0', 10) || null;
-    return { success: true, rowIndex: confirmedRowIndex, alreadyConfirmed: true };
-  }
-
   // Stagger score submission by 0 to 1500ms
   const staggerMs = Math.floor(Math.random() * 1500);
   await sleep(staggerMs);
-
-  if (!APPS_SCRIPT_URL) {
-    markScoreConfirmed();
-    return { success: true, localOnly: true };
-  }
 
   const clientId = getClientId();
   const rawRow = targetRowIndex || localStorage.getItem(STORAGE_KEYS.ROW_INDEX);
@@ -448,7 +429,6 @@ export async function submitFinalScore(
   }
 
   const payload = JSON.stringify({
-    action: 'submitScore',
     clientId: clientId,
     sessionId: sessionId,
     requestId: requestId,
@@ -468,28 +448,24 @@ export async function submitFinalScore(
 
   for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
     try {
-      const response = await fetch(APPS_SCRIPT_URL, {
+      const response = await fetch(`${API_BASE_URL}/submit-score`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'text/plain;charset=utf-8'
+          'Content-Type': 'application/json'
         },
         body: payload
       });
-
-      if (!response.ok) {
-        throw new Error(`Server returned HTTP ${response.status}`);
-      }
 
       let resData = null;
       try {
         resData = await response.json();
       } catch (jsonErr) {
-        throw new Error('Apps Script returned non-JSON response: ' + jsonErr.message);
+        throw new Error('Server returned non-JSON response: ' + jsonErr.message);
       }
 
-      if (!resData || resData.status !== 'success' || !resData.updated) {
-        const errMsg = (resData && (resData.message || resData.code)) || 'Score submission was not confirmed by server';
-        console.warn('Apps Script rejected submitScore:', errMsg);
+      if (!response.ok || !resData || resData.status !== 'success' || !resData.updated) {
+        const errMsg = (resData && (resData.message || resData.code)) || `Server returned HTTP ${response.status}`;
+        console.warn('Backend rejected submitScore:', errMsg);
         throw new Error(errMsg);
       }
 

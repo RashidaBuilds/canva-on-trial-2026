@@ -130,13 +130,33 @@ export default function App() {
     isSubmittingScoreRef.current = true;
     try {
       const currentRow = playerRowIndex || parseInt(localStorage.getItem(STORAGE_KEYS.ROW_INDEX) || '0', 10) || null;
-      const currentScore = typeof playerScore === 'number' && isFinite(playerScore)
-        ? playerScore
-        : parseInt(localStorage.getItem(STORAGE_KEYS.PLAYER_SCORE) || '0', 10);
+
+      // 1. Calculate authoritative cumulative score:
+      // Aggregate completed question history from localStorage
+      let calculatedScore = 0;
+      let hasHistory = false;
+      try {
+        const history = JSON.parse(localStorage.getItem(STORAGE_KEYS.QUESTION_HISTORY) || '{}');
+        const historyValues = Object.values(history);
+        if (historyValues.length > 0) {
+          hasHistory = true;
+          calculatedScore = historyValues.reduce((sum, item) => sum + (Number(item?.pointsEarned) || 0), 0);
+        }
+      } catch (_) {}
+
+      // Cross-check with stored PLAYER_SCORE and React playerScore state
+      const storedScore = parseInt(localStorage.getItem(STORAGE_KEYS.PLAYER_SCORE) || '0', 10);
+      if (!isNaN(storedScore)) {
+        calculatedScore = Math.max(calculatedScore, storedScore);
+      }
+      if (typeof playerScore === 'number' && isFinite(playerScore)) {
+        calculatedScore = Math.max(calculatedScore, playerScore);
+      }
+
       const currentReqId = playerRequestId || localStorage.getItem(STORAGE_KEYS.REQUEST_ID) || null;
       const currentSessionId = sessionId || localStorage.getItem(STORAGE_KEYS.SESSION_ID) || null;
 
-      const res = await submitFinalScore(playerName, currentScore, currentRow, currentReqId, currentSessionId);
+      const res = await submitFinalScore(playerName, calculatedScore, currentRow, currentReqId, currentSessionId);
       if (res && res.success && res.updated) {
         markScoreConfirmed();
         setIsScoreConfirmedState(true);
@@ -282,7 +302,7 @@ export default function App() {
         // Check if current player's score is confirmed on backend
         if (playerRowIndex && Array.isArray(data.players)) {
           const myBackendRecord = data.players.find((p) => p.rowIndex === playerRowIndex);
-          if (myBackendRecord && myBackendRecord.hasScore) {
+          if (myBackendRecord && myBackendRecord.hasScore && myBackendRecord.numericScore !== null) {
             markScoreConfirmed();
             setIsScoreConfirmedState(true);
           }
