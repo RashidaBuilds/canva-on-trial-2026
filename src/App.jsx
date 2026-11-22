@@ -507,7 +507,7 @@ export default function App() {
   if (!playerName || isLateJoin) {
     return (
       <>
-        <MagnifyingLens />
+        <MagnifyingLens enableMobileTouch={!isLateJoin} />
         <JoinScreen onJoin={handleJoin} isLateJoin={isLateJoin} />
       </>
     );

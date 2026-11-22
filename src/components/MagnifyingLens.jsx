@@ -2,39 +2,135 @@ import React, { useEffect, useState, useRef } from 'react';
 
 /**
  * MagnifyingLens Component
- * Adds a small, elegant brass-rimmed magnifying lens that subtly follows the cursor on desktop.
- * On touch devices, provides an unobtrusive highlight sweep without blocking touch/scroll events.
- * Uses pointer-events: none to guarantee zero interference with controls and buttons.
+ * Adds an elegant brass-rimmed magnifying lens.
+ * - Desktop: Smoothly follows cursor via pointer movements across screens.
+ * - Mobile Touch: Active ONLY when enableMobileTouch is true (Login page).
+ *   Follows the finger smoothly on touch, hides immediately on finger release or cancel.
+ *   Strictly protects the nickname input field: never triggers inside or near the input.
+ *   Uses pointer-events: none and passive touch listeners to never block scrolling, taps, or virtual keyboard.
  */
-export default function MagnifyingLens() {
+export default function MagnifyingLens({ enableMobileTouch = false }) {
   const [pos, setPos] = useState({ x: -100, y: -100 });
   const [visible, setVisible] = useState(false);
   const rafRef = useRef(null);
   const targetPos = useRef({ x: -100, y: -100 });
+  const isTouchActiveRef = useRef(false);
+  const isVisibleRef = useRef(false);
 
   useEffect(() => {
     // Check if user prefers reduced motion
     const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
     if (mediaQuery.matches) return;
 
-    // Detect touch device
-    const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-    if (isTouch) {
-      // On mobile, lens is invoked contextually or stays dormant to avoid visual clutter
-      return;
-    }
+    // Helper: detect if target is or is within the nickname input
+    const isInputElement = (target) => {
+      if (!target || !(target instanceof Element)) return false;
+      return (
+        target.id === 'nickname-input' ||
+        !!target.closest('#nickname-input, input, textarea, label[for="nickname-input"]')
+      );
+    };
 
+    // Helper: check if coordinates overlap or are adjacent to nickname input
+    const isNearInputElement = (clientX, clientY) => {
+      const inputEl = document.getElementById('nickname-input');
+      if (!inputEl) return false;
+      const rect = inputEl.getBoundingClientRect();
+      const pad = 24; // safety margin around input
+      return (
+        clientX >= rect.left - pad &&
+        clientX <= rect.right + pad &&
+        clientY >= rect.top - pad &&
+        clientY <= rect.bottom + pad
+      );
+    };
+
+    const showLens = (x, y) => {
+      targetPos.current = { x, y };
+      if (!isVisibleRef.current) {
+        isVisibleRef.current = true;
+        setVisible(true);
+      }
+    };
+
+    const hideLens = () => {
+      if (isVisibleRef.current) {
+        isVisibleRef.current = false;
+        setVisible(false);
+      }
+    };
+
+    // 1. DESKTOP MOUSE / POINTER LOGIC (Preserved across all screens)
     const handlePointerMove = (e) => {
-      targetPos.current = { x: e.clientX, y: e.clientY };
-      if (!visible) setVisible(true);
+      // Ignore touch pointers here; touch is handled separately when enableMobileTouch is true
+      if (e.pointerType === 'touch') return;
+
+      showLens(e.clientX, e.clientY);
     };
 
     const handlePointerLeave = () => {
-      setVisible(false);
+      if (!isTouchActiveRef.current) {
+        hideLens();
+      }
     };
 
+    window.addEventListener('pointermove', handlePointerMove, { passive: true });
+    document.addEventListener('mouseleave', handlePointerLeave);
+
+    // 2. MOBILE TOUCH LOGIC (Only active when enableMobileTouch === true, e.g. Login Page)
+    let handleTouchStart = null;
+    let handleTouchMove = null;
+    let handleTouchEnd = null;
+
+    if (enableMobileTouch) {
+      handleTouchStart = (e) => {
+        if (!e.touches || e.touches.length === 0) return;
+        const touch = e.touches[0];
+
+        // Never trigger when user touches or types inside nickname input
+        if (isInputElement(e.target) || isNearInputElement(touch.clientX, touch.clientY)) {
+          isTouchActiveRef.current = false;
+          hideLens();
+          return;
+        }
+
+        isTouchActiveRef.current = true;
+        // Position immediately at touch point to prevent jump
+        targetPos.current = { x: touch.clientX, y: touch.clientY };
+        setPos({ x: touch.clientX, y: touch.clientY });
+        if (!isVisibleRef.current) {
+          isVisibleRef.current = true;
+          setVisible(true);
+        }
+      };
+
+      handleTouchMove = (e) => {
+        if (!isTouchActiveRef.current || !e.touches || e.touches.length === 0) return;
+        const touch = e.touches[0];
+
+        // If finger enters proximity of nickname input, hide lens to avoid obstructing it
+        if (isNearInputElement(touch.clientX, touch.clientY)) {
+          hideLens();
+          return;
+        }
+
+        showLens(touch.clientX, touch.clientY);
+      };
+
+      handleTouchEnd = () => {
+        isTouchActiveRef.current = false;
+        hideLens();
+      };
+
+      window.addEventListener('touchstart', handleTouchStart, { passive: true });
+      window.addEventListener('touchmove', handleTouchMove, { passive: true });
+      window.addEventListener('touchend', handleTouchEnd, { passive: true });
+      window.addEventListener('touchcancel', handleTouchEnd, { passive: true });
+    }
+
+    // 3. SMOOTH ANIMATION LOOP (rAF lerp for fluid physical motion)
     const loop = () => {
-      setPos(prev => {
+      setPos((prev) => {
         const dx = targetPos.current.x - prev.x;
         const dy = targetPos.current.y - prev.y;
         return {
@@ -45,16 +141,22 @@ export default function MagnifyingLens() {
       rafRef.current = requestAnimationFrame(loop);
     };
 
-    window.addEventListener('pointermove', handlePointerMove, { passive: true });
-    document.addEventListener('mouseleave', handlePointerLeave);
     rafRef.current = requestAnimationFrame(loop);
 
     return () => {
       window.removeEventListener('pointermove', handlePointerMove);
       document.removeEventListener('mouseleave', handlePointerLeave);
+      if (enableMobileTouch) {
+        if (handleTouchStart) window.removeEventListener('touchstart', handleTouchStart);
+        if (handleTouchMove) window.removeEventListener('touchmove', handleTouchMove);
+        if (handleTouchEnd) {
+          window.removeEventListener('touchend', handleTouchEnd);
+          window.removeEventListener('touchcancel', handleTouchEnd);
+        }
+      }
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [visible]);
+  }, [enableMobileTouch]);
 
   if (!visible) return null;
 
