@@ -31,21 +31,24 @@ export default function LeaderboardScreen({
     }
     const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
     const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-    return timeA - timeB;
+    if (timeA !== timeB) {
+      return timeA - timeB;
+    }
+    return (a.rowIndex || 0) - (b.rowIndex || 0);
   });
 
   // 2. Identify the player's personal result strictly by their assigned rowIndex
   const isCurrentPlayer = (investigator) => {
     if (isProjectorView || !currentPlayerName || !investigator) return false;
     if (currentPlayerRowIndex && investigator.rowIndex) {
-      return investigator.rowIndex === currentPlayerRowIndex;
+      return Number(investigator.rowIndex) === Number(currentPlayerRowIndex);
     }
     return !currentPlayerRowIndex && String(investigator.name).toLowerCase() === currentPlayerName.toLowerCase();
   };
 
   const myRecord = (!isProjectorView && currentPlayerRowIndex)
-    ? list.find((p) => p.rowIndex === currentPlayerRowIndex)
-    : null;
+    ? list.find((p) => Number(p.rowIndex) === Number(currentPlayerRowIndex))
+    : list.find((p) => String(p.name).toLowerCase() === currentPlayerName.toLowerCase());
 
   // Calculate actual global rank from the complete authoritative player list
   const myRankIndex = currentPlayerName
@@ -59,9 +62,9 @@ export default function LeaderboardScreen({
     : currentPlayerScore;
 
   // Podium positions (1st, 2nd, 3rd)
-  const firstPlace = list[0] || { name: '—', score: 0 };
-  const secondPlace = list[1] || { name: '—', score: 0 };
-  const thirdPlace = list[2] || { name: '—', score: 0 };
+  const firstPlace = list[0] || { name: '—', score: 0, isPending: true };
+  const secondPlace = list[1] || { name: '—', score: 0, isPending: true };
+  const thirdPlace = list[2] || { name: '—', score: 0, isPending: true };
   const runnersUp = list.slice(3, 10);
 
   return (
@@ -160,7 +163,9 @@ export default function LeaderboardScreen({
                   Final Score
                 </span>
                 <span style={{ fontFamily: 'var(--font-sans)', fontWeight: 700, fontSize: 'clamp(20px, 3vw, 28px)', color: 'var(--color-burgundy)' }}>
-                  {displayScore.toLocaleString()}
+                  {myRecord && myRecord.hasScore
+                    ? `${myRecord.score.toLocaleString()} pts`
+                    : `${displayScore.toLocaleString()} pts`}
                 </span>
               </div>
 
@@ -222,7 +227,11 @@ export default function LeaderboardScreen({
               )}
             </div>
             <div style={{ fontFamily: 'var(--font-sans)', fontWeight: 700, fontSize: '16px', color: 'var(--color-burgundy)', marginTop: '4px' }}>
-              {secondPlace.score.toLocaleString()}
+              {secondPlace.isPending ? (
+                <span style={{ fontStyle: 'italic', fontSize: '13px', color: 'var(--color-ink-muted)' }}>Pending</span>
+              ) : (
+                secondPlace.score.toLocaleString()
+              )}
             </div>
           </div>
 
@@ -266,24 +275,30 @@ export default function LeaderboardScreen({
                 marginTop: '4px'
               }}
             >
-              {firstPlace.score.toLocaleString()}
+              {firstPlace.isPending ? (
+                <span style={{ fontStyle: 'italic', fontSize: '13px', color: 'var(--color-ink-muted)' }}>Pending</span>
+              ) : (
+                firstPlace.score.toLocaleString()
+              )}
             </div>
-            <div
-              style={{
-                fontFamily: 'var(--font-sans)',
-                fontSize: '11px',
-                fontWeight: 600,
-                letterSpacing: '0.08em',
-                color: 'var(--color-gold)',
-                textTransform: 'uppercase',
-                marginTop: '8px',
-                padding: '4px 8px',
-                backgroundColor: 'rgba(184, 137, 39, 0.1)',
-                borderRadius: 'var(--radius-sm)'
-              }}
-            >
-              Chief Creative Investigator
-            </div>
+            {!firstPlace.isPending && firstPlace.name !== '—' && (
+              <div
+                style={{
+                  fontFamily: 'var(--font-sans)',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  letterSpacing: '0.08em',
+                  color: 'var(--color-gold)',
+                  textTransform: 'uppercase',
+                  marginTop: '8px',
+                  padding: '4px 8px',
+                  backgroundColor: 'rgba(184, 137, 39, 0.1)',
+                  borderRadius: 'var(--radius-sm)'
+                }}
+              >
+                Chief Creative Investigator
+              </div>
+            )}
           </div>
 
           {/* 3rd Place Pedestal */}
@@ -316,7 +331,11 @@ export default function LeaderboardScreen({
               )}
             </div>
             <div style={{ fontFamily: 'var(--font-sans)', fontWeight: 700, fontSize: '16px', color: 'var(--color-burgundy)', marginTop: '4px' }}>
-              {thirdPlace.score.toLocaleString()}
+              {thirdPlace.isPending ? (
+                <span style={{ fontStyle: 'italic', fontSize: '13px', color: 'var(--color-ink-muted)' }}>Pending</span>
+              ) : (
+                thirdPlace.score.toLocaleString()
+              )}
             </div>
           </div>
         </div>
@@ -378,7 +397,11 @@ export default function LeaderboardScreen({
                   {isMe && <span style={{ fontSize: '11px', color: 'var(--color-burgundy)' }}>(You)</span>}
                 </span>
                 <span style={{ textAlign: 'right', fontWeight: 600 }}>
-                  {investigator.score.toLocaleString()}
+                  {investigator.isPending ? (
+                    <span style={{ fontStyle: 'italic', fontWeight: 500, fontSize: '12px', color: 'var(--color-ink-muted)' }}>Pending</span>
+                  ) : (
+                    investigator.score.toLocaleString()
+                  )}
                 </span>
               </div>
             );

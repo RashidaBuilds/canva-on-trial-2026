@@ -22,7 +22,9 @@ export default function CompilationScreen({
   totalPlayers = 0,
   scoresSubmitted = 0,
   scoresPending = 0,
-  allScoresSubmitted = false
+  allScoresSubmitted = false,
+  pendingPlayerNames = [],
+  isTimedOut = false
 }) {
   const secondsLeft = Math.max(1, Math.ceil(remainingMs / 1000));
   const progressRatio = totalPlayers > 0
@@ -245,9 +247,9 @@ export default function CompilationScreen({
             <span>
               {isSubmitted
                 ? totalPlayers > 0
-                  ? `Evidence Recorded (${scoresSubmitted} of ${totalPlayers} filed)`
+                  ? `Evidence Confirmed (${scoresSubmitted} of ${totalPlayers} recorded)`
                   : 'Scores Dispatched · Awaiting Final Courtroom Standings'
-                : 'Securing connection to official registry...'}
+                : 'Securing connection to official registry (Retrying automatically)...'}
             </span>
           </div>
 
@@ -286,7 +288,9 @@ export default function CompilationScreen({
             >
               <span>
                 {totalPlayers > 0 && scoresPending > 0
-                  ? `Awaiting ${scoresPending} pending report${scoresPending > 1 ? 's' : ''}...`
+                  ? pendingPlayerNames.length > 0
+                    ? `Awaiting final score submission from: ${pendingPlayerNames.join(', ')}...`
+                    : `Awaiting ${scoresPending} pending report${scoresPending > 1 ? 's' : ''}...`
                   : totalPlayers > 0 && allScoresSubmitted
                     ? 'All reports confirmed · Finalising verdict...'
                     : 'Authenticating case files'}
@@ -297,6 +301,27 @@ export default function CompilationScreen({
                   : `Tallying: ${scoresSubmitted}/${totalPlayers || 1}`}
               </span>
             </div>
+
+            {isTimedOut && scoresPending > 0 && (
+              <div
+                style={{
+                  fontSize: '12px',
+                  color: 'var(--color-burgundy)',
+                  backgroundColor: 'rgba(137, 1, 0, 0.06)',
+                  border: '1px solid var(--color-burgundy)',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '8px 12px',
+                  marginTop: '4px',
+                  textAlign: 'left',
+                  lineHeight: 1.4
+                }}
+              >
+                <strong>Compilation timeout:</strong> Proceeding to courtroom verdict with verified submissions.
+                {pendingPlayerNames.length > 0 && (
+                  <span> Unconfirmed submissions: {pendingPlayerNames.join(', ')}.</span>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </main>

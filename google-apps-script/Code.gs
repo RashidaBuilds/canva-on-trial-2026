@@ -23,6 +23,9 @@
  * - Bounded write locks via LockService (5s); lock-free GET requests
  */
 
+// Canonical 3-column headers on sheet tab "Players"
+var EXPECTED_HEADERS = ['Timestamp', 'Name', 'Score'];
+
 /**
  * Target the specific "Players" sheet tab.
  * Throws a clear error if the Players tab does not exist (never silently uses another tab).
@@ -36,8 +39,45 @@ function getPlayersSheet() {
   return sheet;
 }
 
+/**
+ * Ensure the exact 3-column headers exist on row 1 of the 'Players' sheet tab:
+ * A1: Timestamp
+ * B1: Name
+ * C1: Score
+ * 
+ * Replaces any title, missing headings, or incorrect labels in row 1 with the canonical headers.
+ * Preserves all player data rows from row 2 downwards.
+ */
+function ensurePlayersHeaders(sheet) {
+  var lastRow = sheet.getLastRow();
+
+  if (lastRow === 0) {
+    sheet.appendRow(EXPECTED_HEADERS);
+    SpreadsheetApp.flush();
+    return;
+  }
+
+  var currentHeaderRange = sheet.getRange(1, 1, 1, 3);
+  var currentHeaders = currentHeaderRange.getValues()[0];
+
+  var h0 = String(currentHeaders[0] || '').trim();
+  var h1 = String(currentHeaders[1] || '').trim();
+  var h2 = String(currentHeaders[2] || '').trim();
+
+  // If row 1 does not exactly match ['Timestamp', 'Name', 'Score'], restore the canonical headers
+  if (h0 !== EXPECTED_HEADERS[0] || h1 !== EXPECTED_HEADERS[1] || h2 !== EXPECTED_HEADERS[2]) {
+    currentHeaderRange.setValues([EXPECTED_HEADERS]);
+    SpreadsheetApp.flush();
+  }
+}
+
 // Custom menu visible only to authorized Google Sheets editors
 function onOpen() {
+  try {
+    var sheet = getPlayersSheet();
+    ensurePlayersHeaders(sheet);
+  } catch (_) {}
+
   SpreadsheetApp.getUi()
     .createMenu('Canva on Trial')
     .addItem('Reset Game Session', 'resetGameSession')
@@ -46,19 +86,23 @@ function onOpen() {
 
 /**
  * Cleanly reset game session (Private to sheet editors):
- * 1. Clears player data rows below header row on the Players sheet
- * 2. Clears shared lobby start time, session ID, and request ID mappings in ScriptProperties
+ * 1. Restores canonical headers in row 1 if missing or altered
+ * 2. Clears player data rows below header row on the Players sheet (row 2 downwards ONLY)
+ *    NEVER clears or replaces the header row!
+ * 3. Clears shared lobby start time, session ID, and request ID mappings in ScriptProperties
  */
 function resetGameSession() {
   try {
     var sheet = getPlayersSheet();
+    ensurePlayersHeaders(sheet);
     var lastRow = sheet.getLastRow();
+    // Only clear player rows from row 2 downwards; NEVER clear or replace row 1 (header row)
     if (lastRow > 1) {
       sheet.getRange(2, 1, lastRow - 1, 3).clearContent();
     }
     PropertiesService.getScriptProperties().deleteAllProperties();
     SpreadsheetApp.flush();
-    SpreadsheetApp.getUi().alert('Canva on Trial 2026: Game session reset cleanly on Players tab. Ready for a new game!');
+    SpreadsheetApp.getUi().alert('Canva on Trial 2026: Game session reset cleanly on Players tab. Headers preserved and ready for a new game!');
   } catch (err) {
     SpreadsheetApp.getUi().alert('Reset Error: ' + err.message);
   }
@@ -81,6 +125,7 @@ function doPost(e) {
 
   try {
     var sheet = getPlayersSheet();
+    ensurePlayersHeaders(sheet);
     var props = PropertiesService.getScriptProperties();
     var data = JSON.parse(e.postData.contents);
     var action = data.action;
@@ -88,11 +133,6 @@ function doPost(e) {
     var name = (data.name || '').trim();
     var now = new Date();
     var serverTime = now.getTime();
-
-    // Ensure 3-column header exists if sheet is empty
-    if (sheet.getLastRow() === 0) {
-      sheet.appendRow(['Timestamp', 'Name', 'Score']);
-    }
 
     // -------------------------------------------------------------
     // OPERATION 1: JOIN (Register new player)
@@ -199,7 +239,7 @@ function doPost(e) {
       })).setMimeType(ContentService.MimeType.JSON);
 
     // -------------------------------------------------------------
-    // OPERATION 2: SUBMIT SCORE (Update existing player row by rowIndex & requestId ONLY)
+    // OPERATION 2: SUBMIT SCORE (Update existing player row by rowIndex & requestId)
     // -------------------------------------------------------------
     } else if (action === 'submitScore') {
       var targetRow = data.rowIndex ? parseInt(data.rowIndex, 10) : null;
@@ -207,7 +247,23 @@ function doPost(e) {
       var activeSessionId = props.getProperty('SESSION_ID');
       var clientRequestId = data.requestId || '';
 
-      // 1. Session validation: verify browser sessionId matches current active game session
+      // If activeSessionId is missing from properties, safely derive from lobbyStartTime or first player
+      if (!activeSessionId) {
+        var existingLobby = props.getProperty('LOBBY_START_TIME');
+        if (!existingLobby && sheet.getLastRow() > 1) {
+          var fTs = sheet.getRange(2, 1).getValue();
+          if (fTs) {
+            var fPt = new Date(fTs).getTime();
+            if (!isNaN(fPt) && fPt > 0) existingLobby = fPt.toString();
+          }
+        }
+        if (existingLobby) {
+          activeSessionId = 'sess_' + existingLobby;
+          props.setProperty('SESSION_ID', activeSessionId);
+        }
+      }
+
+      // 1. Session validation: verify browser sessionId matches active session
       if (!clientSessionId || !activeSessionId || clientSessionId !== activeSessionId) {
         return ContentService.createTextOutput(JSON.stringify({
           status: 'error',
@@ -245,7 +301,9 @@ function doPost(e) {
 
       // 4. Verification that requestId maps to the exact submitted row Index and player
       var savedRecord = JSON.parse(savedRecordStr);
-      if (savedRecord.rowIndex !== targetRow || String(savedRecord.name || '').trim().toLowerCase() !== name.toLowerCase()) {
+      var savedRow = Number(savedRecord.rowIndex);
+      var reqName = String(savedRecord.name || '').trim().toLowerCase();
+      if (isNaN(savedRow) || savedRow !== targetRow || reqName !== name.toLowerCase()) {
         return ContentService.createTextOutput(JSON.stringify({
           status: 'error',
           code: 'REQUEST_MISMATCH',
@@ -253,7 +311,7 @@ function doPost(e) {
         })).setMimeType(ContentService.MimeType.JSON);
       }
 
-      // Also verify the spreadsheet row actually contains the matching player name
+      // 5. Verification that target spreadsheet row contains the registered player name
       var rowName = sheet.getRange(targetRow, 2).getValue();
       if (!rowName || String(rowName).trim().toLowerCase() !== name.toLowerCase()) {
         return ContentService.createTextOutput(JSON.stringify({
@@ -263,17 +321,27 @@ function doPost(e) {
         })).setMimeType(ContentService.MimeType.JSON);
       }
 
-      // Validate score: must be a valid, finite number (numeric zero is valid)
-      if (data.score === undefined || data.score === null || typeof data.score !== 'number' || !isFinite(data.score)) {
+      // 5. Validate score: must be a valid, finite number (numeric zero is valid)
+      var scoreNum = null;
+      if (typeof data.score === 'number' && isFinite(data.score)) {
+        scoreNum = data.score;
+      } else if (typeof data.score === 'string' && data.score.trim() !== '') {
+        var parsedScore = Number(data.score.trim());
+        if (!isNaN(parsedScore) && isFinite(parsedScore)) {
+          scoreNum = parsedScore;
+        }
+      }
+
+      if (scoreNum === null) {
         return ContentService.createTextOutput(JSON.stringify({
           status: 'error',
           code: 'INVALID_SCORE',
           message: 'Score must be a valid finite number. Missing or invalid score rejected.'
         })).setMimeType(ContentService.MimeType.JSON);
       }
-      var score = data.score;
+      var score = scoreNum;
 
-      // 5. Strictly update Column C (Score) for the assigned row
+      // 6. Strictly update Column C (Score) for the assigned row
       sheet.getRange(targetRow, 3).setValue(score);
       SpreadsheetApp.flush();
 
@@ -281,7 +349,8 @@ function doPost(e) {
         status: 'success',
         action: 'submitScore',
         rowIndex: targetRow,
-        score: score
+        score: score,
+        updated: true
       })).setMimeType(ContentService.MimeType.JSON);
 
     // -------------------------------------------------------------
@@ -314,6 +383,7 @@ function doPost(e) {
 function doGet(e) {
   try {
     var sheet = getPlayersSheet();
+    ensurePlayersHeaders(sheet);
     var props = PropertiesService.getScriptProperties();
     var rows = sheet.getDataRange().getValues();
     var serverTime = new Date().getTime();

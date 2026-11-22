@@ -20,6 +20,7 @@ export default function QuestionScreen({
 
   const { playQuestionTick, playUiClick } = useAudioEngine();
   const lastPlayedQuestionRef = useRef(null);
+  const hasRecordedAnswerRef = useRef(false);
 
   // Play question-tick.mp3 exactly once per question round; reset state
   useEffect(() => {
@@ -27,12 +28,28 @@ export default function QuestionScreen({
     setIsAnswerSubmitted(false);
     setFeedbackStatus(null);
     setPointsAwarded(0);
+    hasRecordedAnswerRef.current = false;
 
     if (lastPlayedQuestionRef.current !== question.id) {
       lastPlayedQuestionRef.current = question.id;
       playQuestionTick();
     }
-  }, [question.id, playQuestionTick]);
+
+    // Unmount cleanup: if question round transitions without an answer being recorded,
+    // record question as unanswered with 0 points and clear unsubmitted selection
+    return () => {
+      if (!hasRecordedAnswerRef.current) {
+        hasRecordedAnswerRef.current = true;
+        onAnswerSubmit({
+          questionId: question.id,
+          selectedOptionIndex: null,
+          isCorrect: false,
+          pointsEarned: 0,
+          unanswered: true
+        });
+      }
+    };
+  }, [question.id, playQuestionTick, onAnswerSubmit]);
 
   // Step 1: Option Selection (Only highlights; does NOT reveal correctness or lock)
   const handleSelectOption = (index) => {
@@ -44,7 +61,9 @@ export default function QuestionScreen({
   // Step 2: Explicit Submit Action
   const handleSubmitAnswer = () => {
     if (selectedOptionIndex === null || isAnswerSubmitted || roundRemainingMs <= 0) return;
+    if (hasRecordedAnswerRef.current) return; // Prevent duplicate submission
 
+    hasRecordedAnswerRef.current = true;
     playUiClick();
     setIsAnswerSubmitted(true);
 
@@ -68,23 +87,26 @@ export default function QuestionScreen({
       questionId: question.id,
       selectedOptionIndex,
       isCorrect,
-      pointsEarned: earned
+      pointsEarned: earned,
+      unanswered: false
     });
   };
 
   // Step 4: Time's Up handling at deadline
   useEffect(() => {
-    if (roundRemainingMs <= 0 && !isAnswerSubmitted && !feedbackStatus) {
+    if (roundRemainingMs <= 0 && !isAnswerSubmitted && !hasRecordedAnswerRef.current) {
+      hasRecordedAnswerRef.current = true;
       setIsAnswerSubmitted(true);
       setFeedbackStatus('expired');
       onAnswerSubmit({
         questionId: question.id,
         selectedOptionIndex: null,
         isCorrect: false,
-        pointsEarned: 0
+        pointsEarned: 0,
+        unanswered: true
       });
     }
-  }, [roundRemainingMs, isAnswerSubmitted, feedbackStatus, question.id, onAnswerSubmit]);
+  }, [roundRemainingMs, isAnswerSubmitted, question.id, onAnswerSubmit]);
 
   // Clue display rule: reveals at 5s elapsed (5000ms) ONLY IF answer has NOT been submitted
   const isClueVisible = roundElapsedMs >= 5000 && !isAnswerSubmitted && !!question.clue;

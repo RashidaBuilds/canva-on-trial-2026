@@ -23,9 +23,25 @@ export const STORAGE_KEYS = {
   START_TIME: 'canva_trial_2026_start_time',
   PLAYER_NAME: 'canva_trial_2026_player_name',
   PLAYER_SCORE: 'canva_trial_2026_player_score',
+  SCORE_CONFIRMED: 'canva_trial_2026_score_confirmed',
+  QUESTION_HISTORY: 'canva_trial_2026_question_history',
   ROSTER: 'canva_trial_2026_roster',
   TIME_OFFSET: 'canva_trial_2026_server_offset'
 };
+
+/**
+ * Check if the player's final score submission has been confirmed by the server
+ */
+export function isScoreConfirmed() {
+  return localStorage.getItem(STORAGE_KEYS.SCORE_CONFIRMED) === 'true';
+}
+
+/**
+ * Mark player's final score as confirmed
+ */
+export function markScoreConfirmed() {
+  localStorage.setItem(STORAGE_KEYS.SCORE_CONFIRMED, 'true');
+}
 
 // Production: No hardcoded mock users. Populates with actual registered players from backend.
 export const INITIAL_INVESTIGATORS = [];
@@ -106,7 +122,10 @@ export function parseLeaderboardRows(rawInput) {
     }
     const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
     const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-    return timeA - timeB;
+    if (timeA !== timeB) {
+      return timeA - timeB;
+    }
+    return (a.rowIndex || 0) - (b.rowIndex || 0);
   });
 }
 
@@ -224,6 +243,9 @@ export async function registerPlayer(nickname) {
   if (!APPS_SCRIPT_URL) {
     const localReqId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
     localStorage.setItem(STORAGE_KEYS.REQUEST_ID, localReqId);
+    localStorage.setItem(STORAGE_KEYS.PLAYER_SCORE, '0');
+    localStorage.removeItem(STORAGE_KEYS.SCORE_CONFIRMED);
+    localStorage.removeItem(STORAGE_KEYS.QUESTION_HISTORY);
     return {
       success: true,
       localOnly: true,
@@ -237,6 +259,9 @@ export async function registerPlayer(nickname) {
   const clientId = getClientId();
   const requestId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
   localStorage.setItem(STORAGE_KEYS.REQUEST_ID, requestId);
+  localStorage.setItem(STORAGE_KEYS.PLAYER_SCORE, '0');
+  localStorage.removeItem(STORAGE_KEYS.SCORE_CONFIRMED);
+  localStorage.removeItem(STORAGE_KEYS.QUESTION_HISTORY);
 
   const payload = JSON.stringify({
     action: 'join',
@@ -366,19 +391,33 @@ export async function registerPlayer(nickname) {
  * 2. Uses rowIndex to update player's existing row directly without appending
  * 3. Retries with exponential backoff and jitter
  */
-export async function submitFinalScore(nickname, score, targetRowIndex = null) {
+export async function submitFinalScore(
+  nickname,
+  score,
+  targetRowIndex = null,
+  overrideRequestId = null,
+  overrideSessionId = null
+) {
+  // If already confirmed by server, avoid redundant requests
+  if (isScoreConfirmed()) {
+    const confirmedRowIndex = targetRowIndex || parseInt(localStorage.getItem(STORAGE_KEYS.ROW_INDEX) || '0', 10) || null;
+    return { success: true, rowIndex: confirmedRowIndex, alreadyConfirmed: true };
+  }
+
   // Stagger score submission by 0 to 1500ms
   const staggerMs = Math.floor(Math.random() * 1500);
   await sleep(staggerMs);
 
   if (!APPS_SCRIPT_URL) {
+    markScoreConfirmed();
     return { success: true, localOnly: true };
   }
 
   const clientId = getClientId();
-  const savedRowIndex = targetRowIndex || parseInt(localStorage.getItem(STORAGE_KEYS.ROW_INDEX) || '0', 10) || null;
-  const sessionId = localStorage.getItem(STORAGE_KEYS.SESSION_ID) || null;
-  const requestId = localStorage.getItem(STORAGE_KEYS.REQUEST_ID) || null;
+  const rawRow = targetRowIndex || localStorage.getItem(STORAGE_KEYS.ROW_INDEX);
+  const savedRowIndex = rawRow ? parseInt(rawRow, 10) : null;
+  const sessionId = (overrideSessionId || localStorage.getItem(STORAGE_KEYS.SESSION_ID) || '').trim();
+  const requestId = (overrideRequestId || localStorage.getItem(STORAGE_KEYS.REQUEST_ID) || '').trim();
 
   // Strict validation: never attempt score submission without a valid assigned rowIndex
   if (!savedRowIndex || isNaN(savedRowIndex) || savedRowIndex <= 1) {
@@ -387,13 +426,23 @@ export async function submitFinalScore(nickname, score, targetRowIndex = null) {
   }
 
   // Strict score validation: must be a valid finite number (numeric zero is accepted)
-  if (score === undefined || score === null || typeof score !== 'number' || !isFinite(score)) {
+  let numScore = null;
+  if (typeof score === 'number' && isFinite(score)) {
+    numScore = score;
+  } else if (typeof score === 'string' && score.trim() !== '') {
+    const parsed = Number(score.trim());
+    if (!isNaN(parsed) && isFinite(parsed)) {
+      numScore = parsed;
+    }
+  }
+
+  if (numScore === null) {
     console.error('Cannot submit score: score must be a finite number, received', score);
     return { success: false, error: 'Score must be a valid finite number' };
   }
 
   // Strict identity token validation: original registration requestId must be present
-  if (!requestId || String(requestId).trim() === '') {
+  if (!requestId) {
     console.error('Cannot submit score: missing original registration requestId for player', nickname);
     return { success: false, error: 'Missing registration request identifier' };
   }
@@ -405,7 +454,7 @@ export async function submitFinalScore(nickname, score, targetRowIndex = null) {
     requestId: requestId,
     rowIndex: savedRowIndex,
     name: nickname,
-    score: score,
+    score: numScore,
     timestamp: new Date().toISOString()
   });
 
@@ -434,13 +483,19 @@ export async function submitFinalScore(nickname, score, targetRowIndex = null) {
       let resData = null;
       try {
         resData = await response.json();
-      } catch (_) {}
-
-      if (resData && resData.status === 'error') {
-        throw new Error(resData.message || 'Score submission rejected');
+      } catch (jsonErr) {
+        throw new Error('Apps Script returned non-JSON response: ' + jsonErr.message);
       }
 
-      return { success: true, rowIndex: savedRowIndex };
+      if (!resData || resData.status !== 'success' || !resData.updated) {
+        const errMsg = (resData && (resData.message || resData.code)) || 'Score submission was not confirmed by server';
+        console.warn('Apps Script rejected submitScore:', errMsg);
+        throw new Error(errMsg);
+      }
+
+      // Mark score confirmed locally ONLY upon verified server confirmation
+      markScoreConfirmed();
+      return { success: true, rowIndex: savedRowIndex, score: numScore, updated: true };
     } catch (err) {
       lastError = err;
       if (attempt < retryDelays.length) {

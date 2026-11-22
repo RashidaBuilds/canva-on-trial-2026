@@ -18,6 +18,8 @@ import {
   fetchBackendData,
   registerPlayer,
   submitFinalScore,
+  isScoreConfirmed,
+  markScoreConfirmed,
   STORAGE_KEYS,
   INITIAL_INVESTIGATORS
 } from './services/api';
@@ -35,6 +37,8 @@ function clearStoredSession() {
   localStorage.removeItem(STORAGE_KEYS.PLAYER_NAME);
   localStorage.removeItem(STORAGE_KEYS.START_TIME);
   localStorage.removeItem(STORAGE_KEYS.PLAYER_SCORE);
+  localStorage.removeItem(STORAGE_KEYS.SCORE_CONFIRMED);
+  localStorage.removeItem(STORAGE_KEYS.QUESTION_HISTORY);
   localStorage.removeItem(STORAGE_KEYS.ROSTER);
   localStorage.removeItem(STORAGE_KEYS.ROW_INDEX);
   localStorage.removeItem(STORAGE_KEYS.REQUEST_ID);
@@ -89,6 +93,10 @@ export default function App() {
     return saved ? parseInt(saved, 10) : null;
   });
 
+  const [playerRequestId, setPlayerRequestId] = useState(() => {
+    return localStorage.getItem(STORAGE_KEYS.REQUEST_ID) || '';
+  });
+
   const [playerScore, setPlayerScore] = useState(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.PLAYER_SCORE);
     return saved ? parseInt(saved, 10) : 0;
@@ -112,7 +120,33 @@ export default function App() {
   const [scoresSubmitted, setScoresSubmitted] = useState(0);
   const [scoresPending, setScoresPending] = useState(0);
   const [allScoresSubmitted, setAllScoresSubmitted] = useState(false);
-  const scoreSubmittedRef = useRef(false);
+  const [isScoreConfirmedState, setIsScoreConfirmedState] = useState(() => isScoreConfirmed());
+  const [pendingPlayerNames, setPendingPlayerNames] = useState([]);
+  const isSubmittingScoreRef = useRef(false);
+
+  // Synchronous and persistent score submission with automatic retries
+  const triggerFinalScoreSubmission = useCallback(async () => {
+    if (!playerName || isScoreConfirmed() || isSubmittingScoreRef.current) return;
+    isSubmittingScoreRef.current = true;
+    try {
+      const currentRow = playerRowIndex || parseInt(localStorage.getItem(STORAGE_KEYS.ROW_INDEX) || '0', 10) || null;
+      const currentScore = typeof playerScore === 'number' && isFinite(playerScore)
+        ? playerScore
+        : parseInt(localStorage.getItem(STORAGE_KEYS.PLAYER_SCORE) || '0', 10);
+      const currentReqId = playerRequestId || localStorage.getItem(STORAGE_KEYS.REQUEST_ID) || null;
+      const currentSessionId = sessionId || localStorage.getItem(STORAGE_KEYS.SESSION_ID) || null;
+
+      const res = await submitFinalScore(playerName, currentScore, currentRow, currentReqId, currentSessionId);
+      if (res && res.success && res.updated) {
+        markScoreConfirmed();
+        setIsScoreConfirmedState(true);
+      }
+    } catch (err) {
+      console.warn('Final score submission encountered error, will retry:', err.message);
+    } finally {
+      isSubmittingScoreRef.current = false;
+    }
+  }, [playerName, playerScore, playerRowIndex, playerRequestId, sessionId]);
 
   // Hook into shared authoritative timestamp clock
   const {
@@ -121,19 +155,24 @@ export default function App() {
     roundElapsedMs,
     roundRemainingMs,
     lobbyRemainingMs,
-    compilationRemainingMs
+    compilationRemainingMs,
+    isCompilationTimedOut
   } = useGameClock({
     startTime: startTime,
     serverTimeOffset: serverTimeOffset,
     allScoresSubmitted: allScoresSubmitted,
     totalPlayers: totalPlayers,
     onGameComplete: () => {
-      if (playerName && !scoreSubmittedRef.current) {
-        scoreSubmittedRef.current = true;
-        submitFinalScore(playerName, playerScore, playerRowIndex);
-      }
+      triggerFinalScoreSubmission();
     }
   });
+
+  // Automatically submit and retry final score during compilation or leaderboard until confirmed
+  useEffect(() => {
+    if ((phase === 'COMPILATION' || phase === 'LEADERBOARD') && playerName && !isScoreConfirmedState) {
+      triggerFinalScoreSubmission();
+    }
+  }, [phase, playerName, isScoreConfirmedState, triggerFinalScoreSubmission]);
 
   // 5. Staggered Polling, Session Reconciler & Authoritative Sync
   // Polling rules:
@@ -170,7 +209,10 @@ export default function App() {
         const hasBackendSession = !!(data.lobbyStartTime || (data.players && data.players.length > 0));
 
         // Session Transition Reconciler:
-        if (!hasBackendSession) {
+        // Do NOT purge an active registered player while game is actively in progress
+        const isGameActive = phase === 'QUESTION' || phase === 'COMPILATION' || phase === 'LEADERBOARD';
+
+        if (!hasBackendSession && !isGameActive) {
           // Backend has NO active session (sheet was reset or cleared by editor)
           if (sessionId || startTime || playerName) {
             clearStoredSession();
@@ -186,10 +228,11 @@ export default function App() {
             setScoresSubmitted(0);
             setScoresPending(0);
             setAllScoresSubmitted(false);
-            scoreSubmittedRef.current = false;
+            setIsScoreConfirmedState(false);
+            setPendingPlayerNames([]);
           }
-        } else if (backendSessionId && sessionId && backendSessionId !== sessionId) {
-          // Genuinely NEW game session started on backend! Purge old session completely!
+        } else if (backendSessionId && sessionId && backendSessionId !== sessionId && !isGameActive) {
+          // Genuinely NEW game session started on backend! Purge old session only if not in active game
           clearStoredSession();
           setSessionId(backendSessionId);
           localStorage.setItem(STORAGE_KEYS.SESSION_ID, backendSessionId);
@@ -207,7 +250,8 @@ export default function App() {
           setScoresSubmitted(typeof data.scoresSubmitted === 'number' ? data.scoresSubmitted : 0);
           setScoresPending(typeof data.scoresPending === 'number' ? data.scoresPending : 0);
           setAllScoresSubmitted(!!data.allScoresSubmitted);
-          scoreSubmittedRef.current = false;
+          setIsScoreConfirmedState(false);
+          setPendingPlayerNames([]);
         } else if (backendSessionId && !sessionId) {
           // Discovered active session on mount
           setSessionId(backendSessionId);
@@ -233,6 +277,26 @@ export default function App() {
         }
         if (typeof data.allScoresSubmitted === 'boolean') {
           setAllScoresSubmitted(data.allScoresSubmitted);
+        }
+
+        // Check if current player's score is confirmed on backend
+        if (playerRowIndex && Array.isArray(data.players)) {
+          const myBackendRecord = data.players.find((p) => p.rowIndex === playerRowIndex);
+          if (myBackendRecord && myBackendRecord.hasScore) {
+            markScoreConfirmed();
+            setIsScoreConfirmedState(true);
+          }
+        }
+
+        // Track pending player names
+        if (Array.isArray(data.players)) {
+          const pending = data.players.filter((p) => p.isPending).map((p) => p.name);
+          setPendingPlayerNames(pending);
+        }
+
+        // Retry final score submission during compilation if still unconfirmed
+        if ((phase === 'COMPILATION' || phase === 'LEADERBOARD') && playerName && !isScoreConfirmed()) {
+          triggerFinalScoreSubmission();
         }
 
         // Update leaderboard data
@@ -319,6 +383,11 @@ export default function App() {
       localStorage.setItem(STORAGE_KEYS.ROW_INDEX, String(res.rowIndex));
     }
 
+    if (res.requestId) {
+      setPlayerRequestId(res.requestId);
+      localStorage.setItem(STORAGE_KEYS.REQUEST_ID, res.requestId);
+    }
+
     // 3. Synchronise authoritative lobby start time
     let authoritativeStart = res.lobbyStartTime || startTime;
     if (!authoritativeStart) {
@@ -343,21 +412,34 @@ export default function App() {
       setServerTimeOffset(res.serverTimeOffset);
     }
 
-    // 4. Update investigator roster immediately
+    // 4. Initialize clean score state and update investigator roster immediately
+    localStorage.setItem(STORAGE_KEYS.PLAYER_SCORE, '0');
+    localStorage.removeItem(STORAGE_KEYS.SCORE_CONFIRMED);
+    localStorage.removeItem(STORAGE_KEYS.QUESTION_HISTORY);
+    setPlayerScore(0);
+    setIsScoreConfirmedState(false);
     setInvestigators((prev) => [nickname, ...prev]);
 
     return { success: true };
   }, [startTime, serverTimeOffset]);
 
   // Handle Answer Submission during Question rounds
-  const handleAnswerSubmit = useCallback(({ pointsEarned }) => {
-    if (pointsEarned > 0) {
-      setPlayerScore((prev) => {
-        const nextScore = prev + pointsEarned;
-        localStorage.setItem(STORAGE_KEYS.PLAYER_SCORE, String(nextScore));
-        return nextScore;
-      });
-    }
+  const handleAnswerSubmit = useCallback(({ questionId, pointsEarned, unanswered }) => {
+    setPlayerScore((prev) => {
+      const nextScore = prev + (pointsEarned || 0);
+      localStorage.setItem(STORAGE_KEYS.PLAYER_SCORE, String(nextScore));
+      return nextScore;
+    });
+
+    try {
+      const existingHistory = JSON.parse(localStorage.getItem(STORAGE_KEYS.QUESTION_HISTORY) || '{}');
+      existingHistory[questionId] = {
+        pointsEarned: pointsEarned || 0,
+        unanswered: !!unanswered,
+        timestamp: Date.now()
+      };
+      localStorage.setItem(STORAGE_KEYS.QUESTION_HISTORY, JSON.stringify(existingHistory));
+    } catch (_) {}
   }, []);
 
   // ROUTE 1: Public Projector View (/leaderboard)
@@ -377,6 +459,8 @@ export default function App() {
             scoresSubmitted={scoresSubmitted}
             scoresPending={scoresPending}
             allScoresSubmitted={allScoresSubmitted}
+            pendingPlayerNames={pendingPlayerNames}
+            isTimedOut={isCompilationTimedOut}
           />
         </>
       );
@@ -455,11 +539,13 @@ export default function App() {
           playerName={playerName}
           playerScore={playerScore}
           isProjectorView={false}
-          isSubmitted={scoreSubmittedRef.current}
+          isSubmitted={isScoreConfirmedState}
           totalPlayers={totalPlayers}
           scoresSubmitted={scoresSubmitted}
           scoresPending={scoresPending}
           allScoresSubmitted={allScoresSubmitted}
+          pendingPlayerNames={pendingPlayerNames}
+          isTimedOut={isCompilationTimedOut}
         />
       </>
     );
